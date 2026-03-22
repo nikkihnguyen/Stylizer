@@ -1,0 +1,326 @@
+.app-shell {
+  min-height: 100svh;
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  background:
+    radial-gradient(circle at top left, rgba(255, 180, 112, 0.18), transparent 28%),
+    radial-gradient(circle at top right, rgba(76, 198, 255, 0.16), transparent 24%),
+    linear-gradient(180deg, #070707 0%, #0f0f12 100%);
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.2rem;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(5, 5, 7, 0.82);
+  backdrop-filter: blur(18px);
+}
+
+.sidebar-block {
+  padding: 1rem;
+  border-radius: 1.35rem;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28);
+}
+
+.top-bar {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: start;
+}
+
+.eyebrow,
+.section-kicker {
+  margin: 0 0 0.65rem;
+  font-size: 0.68rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.38);
+}
+
+.lede {
+  margin: 0.45rem 0 0;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 0.95rem;
+}
+
+.upload-card {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 3.6rem;
+  border-radius: 1rem;
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
+    rgba(255, 255, 255, 0.02);
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.upload-card input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.effect-grid,
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.effect-button,
+.chip,
+.button,
+.region-row {
+  appearance: none;
+  border: 0;
+  border-radius: 0.9rem;
+  font: inherit;
+  cursor: pointer;
+  transition:
+    transform 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease,
+    border-color 120ms ease;
+}
+
+.effect-button,
+.chip {
+  padding: 0.72rem 0.88rem;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.effect-button.is-active,
+.chip.is-active {
+  background: #f4f1ea;
+  color: #070707;
+}
+
+.slider-field {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.85rem;
+}
+
+.slider-header,
+.toggle-field,
+.color-field,
+.preview-toolbar,
+.preview-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.slider-header,
+.toggle-field span,
+.color-field span {
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.slider-header span:last-child,
+.preview-meta span:last-child {
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.slider-input {
+  width: 100%;
+  accent-color: #f4f1ea;
+}
+
+.toggle {
+  position: relative;
+  width: 3rem;
+  height: 1.7rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.toggle span {
+  position: absolute;
+  top: 0.2rem;
+  left: 0.2rem;
+  width: 1.3rem;
+  height: 1.3rem;
+  border-radius: 50%;
+  background: #f7f7f2;
+  transition: transform 120ms ease;
+}
+
+.toggle.is-on {
+  background: rgba(255, 181, 92, 0.4);
+}
+
+.toggle.is-on span {
+  transform: translateX(1.3rem);
+}
+
+.color-field {
+  margin-top: 0.4rem;
+}
+
+.color-field input {
+  width: 3rem;
+  height: 2rem;
+  border: 0;
+  background: transparent;
+}
+
+.button {
+  padding: 0.72rem 1rem;
+  font-weight: 600;
+}
+
+.button-ghost {
+  background: #f4f1ea;
+  color: #070707;
+}
+
+.button-muted {
+  background: rgba(255, 255, 255, 0.09);
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.button-danger {
+  background: rgba(255, 85, 85, 0.2);
+  color: #ffb0b0;
+}
+
+.preview-shell {
+  display: flex;
+  flex-direction: column;
+  padding: 1.2rem;
+  gap: 1rem;
+}
+
+.preview-toolbar {
+  padding: 1rem 1.2rem;
+  border-radius: 1.3rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.preview-meta {
+  flex-direction: column;
+  align-items: start;
+  gap: 0.1rem;
+}
+
+.preview-meta span:first-child {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.preview-frame {
+  position: relative;
+  flex: 1;
+  border-radius: 1.7rem;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background:
+    radial-gradient(circle at center, rgba(255, 255, 255, 0.05), transparent 42%),
+    linear-gradient(180deg, #0a0a0a, #050505);
+  display: grid;
+  place-items: center;
+  min-height: 60svh;
+}
+
+.preview-canvas {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.preview-canvas.is-cover {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.preview-canvas.is-contain {
+  width: auto;
+  height: auto;
+  object-fit: contain;
+}
+
+.empty-state {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.42);
+  pointer-events: none;
+}
+
+.empty-state p {
+  margin: 0 0 0.4rem;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 1.1rem;
+}
+
+.error-text {
+  margin: 0.6rem 0 0;
+  color: #ff9999;
+  font-size: 0.92rem;
+}
+
+.region-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.region-row {
+  width: 100%;
+  padding: 0.72rem 0.85rem;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.8);
+  display: flex;
+  justify-content: space-between;
+  text-align: left;
+}
+
+.region-row span:last-child {
+  color: rgba(255, 255, 255, 0.38);
+  font-size: 0.76rem;
+}
+
+.region-row.is-active {
+  background: rgba(0, 255, 136, 0.14);
+  color: #d4ffe8;
+}
+
+.region-actions {
+  display: flex;
+  gap: 0.6rem;
+  margin-top: 0.8rem;
+}
+
+.region-actions .button {
+  flex: 1;
+}
+
+@media (max-width: 1080px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+
+  .preview-frame {
+    min-height: 45svh;
+  }
+}
