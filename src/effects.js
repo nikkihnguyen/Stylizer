@@ -211,31 +211,12 @@ const drawAscii = (context, source, width, height, settings, now) => {
   applyBrightnessContrast(context, width, height, settings.brightness ?? 0, settings.contrast ?? 0)
 }
 
-const applyRegionFilter = (context, region, width, height) => {
-  const shouldInvertRegion = region.invertRegion ?? false
-  const shouldInvertInside = shouldInvertRegion && (region.invertScope ?? 'inside') !== 'outside'
-  if (region.filter === 'none' && !shouldInvertInside) {
-    return
-  }
-
-  const startX = clamp(Math.floor(region.x), 0, width - 1)
-  const startY = clamp(Math.floor(region.y), 0, height - 1)
-  const regionWidth = clamp(Math.floor(region.width), 1, width - startX)
-  const regionHeight = clamp(Math.floor(region.height), 1, height - startY)
-  if (regionWidth <= 0 || regionHeight <= 0) {
-    return
-  }
-
-  const imageData = context.getImageData(startX, startY, regionWidth, regionHeight)
+const applyFilterToImageData = (imageData, filterId, filterIntensity, regionWidth, regionHeight) => {
   const { data } = imageData
   const original = new Uint8ClampedArray(data)
-  const filterIntensity = clamp((region.filterIntensity ?? 100) / 100, 0, 1)
-  if (filterIntensity <= 0 && !shouldInvertInside) {
-    return
-  }
 
-  if (region.filter !== 'none' && filterIntensity > 0) {
-    switch (region.filter) {
+  if (filterId !== 'none' && filterIntensity > 0) {
+    switch (filterId) {
       case 'inv':
         for (let index = 0; index < data.length; index += 4) {
           data[index] = 255 - data[index]
@@ -478,19 +459,70 @@ const applyRegionFilter = (context, region, width, height) => {
     }
   }
 
-  if (region.filter !== 'none' && filterIntensity < 1) {
+  if (filterId !== 'none' && filterIntensity < 1) {
     for (let index = 0; index < data.length; index += 4) {
       data[index] = clamp(original[index] + (data[index] - original[index]) * filterIntensity, 0, 255)
       data[index + 1] = clamp(original[index + 1] + (data[index + 1] - original[index + 1]) * filterIntensity, 0, 255)
       data[index + 2] = clamp(original[index + 2] + (data[index + 2] - original[index + 2]) * filterIntensity, 0, 255)
     }
   }
+}
 
-  if (shouldInvertInside) {
-    for (let index = 0; index < data.length; index += 4) {
-      data[index] = 255 - data[index]
-      data[index + 1] = 255 - data[index + 1]
-      data[index + 2] = 255 - data[index + 2]
+const restorePixel = (data, original, base) => {
+  data[base] = original[base]
+  data[base + 1] = original[base + 1]
+  data[base + 2] = original[base + 2]
+  data[base + 3] = original[base + 3]
+}
+
+const applyRegionFilter = (context, region, width, height) => {
+  const filterIntensity = clamp((region.filterIntensity ?? 100) / 100, 0, 1)
+  if (region.filter === 'none' || filterIntensity <= 0) {
+    return
+  }
+
+  const effectScope = region.effectScope ?? 'inside'
+
+  if (effectScope === 'outside') {
+    const imageData = context.getImageData(0, 0, width, height)
+    const original = new Uint8ClampedArray(imageData.data)
+    const { data } = imageData
+
+    applyFilterToImageData(imageData, region.filter, filterIntensity, width, height)
+
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        if (!pointInsideRegion(region, x, y)) {
+          continue
+        }
+        restorePixel(data, original, (y * width + x) * 4)
+      }
+    }
+
+    context.putImageData(imageData, 0, 0)
+    return
+  }
+
+  const startX = clamp(Math.floor(region.x), 0, width - 1)
+  const startY = clamp(Math.floor(region.y), 0, height - 1)
+  const regionWidth = clamp(Math.floor(region.width), 1, width - startX)
+  const regionHeight = clamp(Math.floor(region.height), 1, height - startY)
+  if (regionWidth <= 0 || regionHeight <= 0) {
+    return
+  }
+
+  const imageData = context.getImageData(startX, startY, regionWidth, regionHeight)
+  const original = new Uint8ClampedArray(imageData.data)
+  const { data } = imageData
+
+  applyFilterToImageData(imageData, region.filter, filterIntensity, regionWidth, regionHeight)
+
+  for (let y = 0; y < regionHeight; y += 1) {
+    for (let x = 0; x < regionWidth; x += 1) {
+      if (pointInsideRegion(region, startX + x, startY + y)) {
+        continue
+      }
+      restorePixel(data, original, (y * regionWidth + x) * 4)
     }
   }
 
@@ -519,31 +551,6 @@ const pointInsideRegion = (region, x, y) => {
     && y >= region.y
     && y < region.y + region.height
   )
-}
-
-const invertOutsideRegions = (context, regions, width, height) => {
-  if (regions.length === 0) {
-    return
-  }
-
-  const imageData = context.getImageData(0, 0, width, height)
-  const { data } = imageData
-
-  for (let y = 0; y < height; y += 1) {
-    for (let x = 0; x < width; x += 1) {
-      const isInsideAnyRegion = regions.some((region) => pointInsideRegion(region, x, y))
-      if (isInsideAnyRegion) {
-        continue
-      }
-
-      const base = (y * width + x) * 4
-      data[base] = 255 - data[base]
-      data[base + 1] = 255 - data[base + 1]
-      data[base + 2] = 255 - data[base + 2]
-    }
-  }
-
-  context.putImageData(imageData, 0, 0)
 }
 
 const drawRegionShape = (context, region, selected) => {
@@ -1195,12 +1202,6 @@ export const renderEffect = ({
       for (const region of regions) {
         applyRegionFilter(context, region, width, height)
       }
-      invertOutsideRegions(
-        context,
-        regions.filter((region) => region.invertRegion && (region.invertScope ?? 'inside') === 'outside'),
-        width,
-        height,
-      )
       drawConnections(context, regions, connectionStyle, connectionRate)
       for (const region of regions) {
         drawRegionShape(context, region, region.id === selectedRegionId)

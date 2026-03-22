@@ -73,10 +73,10 @@ const createPixelContext = (width, height, pixels) => {
 }
 
 const baseRegion = {
-  filter: 'none',
+  effectScope: 'inside',
+  filter: 'inv',
   filterIntensity: 100,
   height: 1,
-  invertRegion: true,
   shape: 'rectangle',
   style: 'basic',
   width: 1,
@@ -84,8 +84,8 @@ const baseRegion = {
   y: 0,
 }
 
-describe('renderEffect img-track inversion', () => {
-  it('inverts pixels inside the region when invert scope is inside', () => {
+describe('renderEffect img-track effect scope', () => {
+  it('applies the region filter inside the region when scope is inside', () => {
     const context = createPixelContext(2, 1, [
       10, 20, 30, 255,
       100, 150, 200, 255,
@@ -102,8 +102,8 @@ describe('renderEffect img-track inversion', () => {
       regions: [
         {
           ...baseRegion,
+          effectScope: 'inside',
           id: 'region-1',
-          invertScope: 'inside',
           label: 'Region 1',
         },
       ],
@@ -118,7 +118,7 @@ describe('renderEffect img-track inversion', () => {
     ])
   })
 
-  it('inverts pixels outside the region when invert scope is outside', () => {
+  it('applies the region filter outside the region when scope is outside', () => {
     const context = createPixelContext(2, 1, [
       10, 20, 30, 255,
       100, 150, 200, 255,
@@ -135,8 +135,8 @@ describe('renderEffect img-track inversion', () => {
       regions: [
         {
           ...baseRegion,
+          effectScope: 'outside',
           id: 'region-1',
-          invertScope: 'outside',
           label: 'Region 1',
         },
       ],

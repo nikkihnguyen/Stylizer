@@ -701,7 +701,7 @@ describe('App rendering regressions', () => {
     expect(screen.getByText('Pinch thumb and index to control Filter Intensity.')).toBeInTheDocument()
   })
 
-  it('applies the ImgTrack invert-region toggle to tracked regions', async () => {
+  it('applies the ImgTrack effect scope to tracked regions', async () => {
     const tracker = createTrackerMock()
     tracker.detect.mockReturnValue({
       pinch: null,
@@ -734,7 +734,7 @@ describe('App rendering regressions', () => {
     await flushMicrotasks()
     await flushFrame(16)
 
-    clickToggle('Invert Region')
+    fireEvent.click(screen.getByRole('button', { name: 'Outside' }))
     await flushMicrotasks()
     await flushFrame(160)
 
@@ -742,7 +742,7 @@ describe('App rendering regressions', () => {
       effectId: 'img-track',
       regions: expect.arrayContaining([
         expect.objectContaining({
-          invertRegion: true,
+          effectScope: 'outside',
           label: 'Left Hand',
           trackingSource: 'hand',
         }),

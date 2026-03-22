@@ -23,8 +23,7 @@ const buildInitialTrackState = () => ({
   shape: EMPTY_REGION_STYLE.shape,
   style: EMPTY_REGION_STYLE.style,
   filter: EMPTY_REGION_STYLE.filter,
-  invertRegion: false,
-  invertScope: 'inside',
+  effectScope: 'inside',
   regionFilterIntensity: 100,
   connectionStyle: EMPTY_REGION_STYLE.connectionStyle,
   connectionRate: EMPTY_REGION_STYLE.connectionRate,
@@ -69,8 +68,7 @@ const normalizeTrackedRegion = (region, trackState) => ({
   ...region,
   filter: trackState.filter,
   filterIntensity: trackState.regionFilterIntensity,
-  invertRegion: trackState.invertRegion,
-  invertScope: trackState.invertScope,
+  effectScope: trackState.effectScope,
   shape: trackState.shape,
   style: trackState.style,
 })
@@ -537,8 +535,7 @@ function App() {
                 ...state.regions.map((region) => ({
                   ...region,
                   filterIntensity: currentTrackState.regionFilterIntensity,
-                  invertRegion: currentTrackState.invertRegion,
-                  invertScope: currentTrackState.invertScope,
+                  effectScope: currentTrackState.effectScope,
                 })),
               ]
             : state.regions
@@ -1081,8 +1078,7 @@ function App() {
         y: point.y,
         width: 0,
         height: 0,
-        invertRegion: trackState.invertRegion,
-        invertScope: trackState.invertScope,
+        effectScope: trackState.effectScope,
         shape: trackState.shape,
         style: trackState.style,
         filter: trackState.filter,
@@ -1113,8 +1109,7 @@ function App() {
         y,
         width,
         height,
-        invertRegion: trackState.invertRegion,
-        invertScope: trackState.invertScope,
+        effectScope: trackState.effectScope,
         shape: trackState.shape,
         style: trackState.style,
         filter: trackState.filter,
@@ -1138,8 +1133,7 @@ function App() {
           y: draftRegion.y,
           width: draftRegion.width,
           height: draftRegion.height,
-          invertRegion: trackState.invertRegion,
-          invertScope: trackState.invertScope,
+          effectScope: trackState.effectScope,
           shape: trackState.shape,
           style: trackState.style,
           filter: trackState.filter,
@@ -1455,20 +1449,15 @@ function App() {
               <SegmentedControl onChange={(value) => updateTrackState('shape', value)} options={[{ label: 'Rectangle', value: 'rectangle' }, { label: 'Circle', value: 'circle' }, { label: 'Ellipse', value: 'ellipse' }]} value={trackState.shape} />
               <SectionTitle>Region Style</SectionTitle>
               <SegmentedControl onChange={(value) => updateTrackState('style', value)} options={REGION_STYLES.map((style) => ({ label: style.label, value: style.id }))} value={trackState.style} />
-              <ToggleControl checked={trackState.invertRegion} label="Invert Region" onChange={(value) => updateTrackState('invertRegion', value)} />
-              {trackState.invertRegion ? (
-                <>
-                  <SectionTitle>Invert Scope</SectionTitle>
-                  <SegmentedControl
-                    onChange={(value) => updateTrackState('invertScope', value)}
-                    options={[
-                      { label: 'Inside', value: 'inside' },
-                      { label: 'Outside', value: 'outside' },
-                    ]}
-                    value={trackState.invertScope}
-                  />
-                </>
-              ) : null}
+              <SectionTitle>Effect Scope</SectionTitle>
+              <SegmentedControl
+                onChange={(value) => updateTrackState('effectScope', value)}
+                options={[
+                  { label: 'Inside', value: 'inside' },
+                  { label: 'Outside', value: 'outside' },
+                ]}
+                value={trackState.effectScope}
+              />
               <SectionTitle>Filter Effects</SectionTitle>
               <SegmentedControl onChange={(value) => updateTrackState('filter', value)} options={REGION_FILTERS.map((filter) => ({ label: filter.label, value: filter.id }))} value={trackState.filter} />
               <SectionTitle>Connections</SectionTitle>
