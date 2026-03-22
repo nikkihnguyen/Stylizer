@@ -93,3 +93,20 @@ test.describe('3D preview', () => {
       .not.toBe(afterEffectInfo.hash)
   })
 })
+
+test.describe('Webcam source', () => {
+  test('starts the webcam source and renders a live preview', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Use webcam' }).click()
+
+    await expect(page.getByText(/Webcam live · \d+ × \d+/)).toBeVisible()
+
+    await expect
+      .poll(async () => (await readCanvasInfo(page)).width, { message: 'webcam preview should size the visible canvas' })
+      .toBeGreaterThan(500)
+
+    await expect
+      .poll(async () => (await readCanvasInfo(page)).alphaSum, { message: 'webcam preview should produce visible pixels' })
+      .toBeGreaterThan(0)
+  })
+})

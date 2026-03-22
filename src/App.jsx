@@ -38,6 +38,12 @@ const buildInitialModelConfig = () => ({
   background: '#0d0d10',
 })
 
+const buildEmptyWebcamInfo = () => ({
+  ready: false,
+  width: 0,
+  height: 0,
+})
+
 const readFileAsUrl = (file) =>
   new Promise((resolve, reject) => {
     const reader = new FileReader()
@@ -124,6 +130,7 @@ function App() {
   const [sourceUrl, setSourceUrl] = useState('')
   const [image, setImage] = useState(null)
   const [modelName, setModelName] = useState('')
+  const [webcamInfo, setWebcamInfo] = useState(buildEmptyWebcamInfo)
   const [error, setError] = useState('')
   const [fitMode, setFitMode] = useState('contain')
 
@@ -131,6 +138,8 @@ function App() {
   const previewFrameRef = useRef(null)
   const modelViewerRef = useRef(null)
   const effectCanvasRef = useRef(null)
+  const webcamStreamRef = useRef(null)
+  const webcamVideoRef = useRef(null)
   const renderStateRef = useRef({
     draftRegion: null,
     effectId,
@@ -150,6 +159,7 @@ function App() {
   })
   const lowQualityUntilRef = useRef(0)
   const lastModelFrameRef = useRef(0)
+  const lastWebcamFrameRef = useRef(0)
   const renderRequestedRef = useRef(true)
   const rafIdRef = useRef(0)
   const requestRenderRef = useRef(() => {})
@@ -170,6 +180,22 @@ function App() {
     invalidateModelPreviewRef.current()
   }
 
+  const releaseWebcam = useCallback(() => {
+    const stream = webcamStreamRef.current
+    if (stream) {
+      stream.getTracks().forEach((track) => track.stop())
+    }
+    webcamStreamRef.current = null
+
+    const video = webcamVideoRef.current
+    if (video) {
+      video.pause?.()
+      video.srcObject = null
+    }
+    webcamVideoRef.current = null
+    lastWebcamFrameRef.current = 0
+  }, [])
+
   useEffect(() => {
     let viewer
     try {
@@ -183,9 +209,8 @@ function App() {
             : '3D preview unavailable on this device/browser.',
         )
       })
-      requestRenderRef.current = () => {}
-      invalidateModelPreviewRef.current = () => {}
-      return undefined
+      viewer = null
+      modelViewerRef.current = null
     }
 
     effectCanvasRef.current = document.createElement('canvas')
@@ -209,16 +234,34 @@ function App() {
         const displayContext = canvas.getContext('2d', { willReadFrequently: true })
         const effectContext = effectCanvas?.getContext('2d', { willReadFrequently: true })
         const state = renderStateRef.current
+        const webcamVideo = webcamVideoRef.current
+        const webcamReady = Boolean(
+          webcamVideo &&
+          webcamVideo.readyState >= 2 &&
+          webcamVideo.videoWidth > 0 &&
+          webcamVideo.videoHeight > 0,
+        )
         const shouldAnimate =
-          (state.sourceKind === 'model' && (state.modelConfig.autoRotate || viewer.isDragging() || time < lowQualityUntilRef.current)) ||
+          (state.sourceKind === 'model' && Boolean(viewer) && (state.modelConfig.autoRotate || viewer.isDragging() || time < lowQualityUntilRef.current)) ||
+          (state.sourceKind === 'webcam' && webcamReady) ||
           (state.effectId === 'ascii-kit' && state.settings['ascii-kit'].animated)
 
-        if (state.sourceKind === 'model' && shouldAnimate && !renderRequestedRef.current) {
-          const targetFps = state.modelConfig.autoRotate ? 12 : viewer.isDragging() ? 20 : 40
-          const frameInterval = 1000 / targetFps
-          if (time - lastModelFrameRef.current < frameInterval) {
-            ensureRenderLoop()
-            return
+        if (shouldAnimate && !renderRequestedRef.current) {
+          if (state.sourceKind === 'model' && viewer) {
+            const targetFps = state.modelConfig.autoRotate ? 12 : viewer.isDragging() ? 20 : 40
+            const frameInterval = 1000 / targetFps
+            if (time - lastModelFrameRef.current < frameInterval) {
+              ensureRenderLoop()
+              return
+            }
+          }
+
+          if (state.sourceKind === 'webcam') {
+            const frameInterval = 1000 / 24
+            if (time - lastWebcamFrameRef.current < frameInterval) {
+              ensureRenderLoop()
+              return
+            }
           }
         }
 
@@ -230,7 +273,7 @@ function App() {
         let displayWidth = 0
         let displayHeight = 0
 
-        if (state.sourceKind === 'model') {
+        if (state.sourceKind === 'model' && viewer) {
           const bounds = previewFrame.getBoundingClientRect()
           const interacting = state.modelConfig.autoRotate || viewer.isDragging() || time < lowQualityUntilRef.current
           const qualityScale = interacting ? 0.45 : 0.9
@@ -242,6 +285,11 @@ function App() {
           viewer.setViewport(sourceWidth, sourceHeight)
           source = viewer.render(state.modelConfig)
           lastModelFrameRef.current = time
+        } else if (state.sourceKind === 'webcam' && webcamReady) {
+          sourceWidth = webcamVideo.videoWidth
+          sourceHeight = webcamVideo.videoHeight
+          source = webcamVideo
+          lastWebcamFrameRef.current = time
         } else if (state.image) {
           sourceWidth = state.image.naturalWidth || state.image.width
           sourceHeight = state.image.naturalHeight || state.image.height
@@ -298,7 +346,8 @@ function App() {
 
         if (
           renderRequestedRef.current ||
-          (state.sourceKind === 'model' && (state.modelConfig.autoRotate || viewer.isDragging() || time < lowQualityUntilRef.current)) ||
+          (state.sourceKind === 'model' && Boolean(viewer) && (state.modelConfig.autoRotate || viewer.isDragging() || time < lowQualityUntilRef.current)) ||
+          (state.sourceKind === 'webcam' && webcamReady) ||
           (state.effectId === 'ascii-kit' && state.settings['ascii-kit'].animated)
         ) {
           ensureRenderLoop()
@@ -333,14 +382,15 @@ function App() {
       resizeObserver.disconnect()
       requestRenderRef.current = () => {}
       invalidateModelPreviewRef.current = () => {}
+      releaseWebcam()
       modelViewerRef.current = null
       if (rafIdRef.current) {
         cancelAnimationFrame(rafIdRef.current)
         rafIdRef.current = 0
       }
-      viewer.dispose()
+      viewer?.dispose()
     }
-  }, [])
+  }, [releaseWebcam])
 
   useEffect(() => {
     if (!sourceUrl) {
@@ -380,7 +430,12 @@ function App() {
   const currentSettings = settings[effectId]
   const showStandaloneColor =
     PANEL_COLOR_EFFECTS.has(effectId) || (effectId === 'ascii-kit' && currentSettings.colorMode === 'mono')
-  const hasSource = sourceKind === 'model' ? Boolean(modelName) : Boolean(image)
+  const hasSource =
+    sourceKind === 'model'
+      ? Boolean(modelName)
+      : sourceKind === 'webcam'
+        ? webcamInfo.ready
+        : Boolean(image)
 
   const updateSetting = (key, value) => {
     const nextSettings = {
@@ -462,6 +517,91 @@ function App() {
     requestRender(sourceKind === 'model')
   }
 
+  const stopWebcam = () => {
+    releaseWebcam()
+    syncRenderState({ image: null, sourceKind: null })
+    setSourceKind(null)
+    setImage(null)
+    setSourceUrl('')
+    setModelName('')
+    setWebcamInfo(buildEmptyWebcamInfo())
+    requestRender()
+  }
+
+  const startWebcam = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setError('Webcam unavailable in this browser.')
+      return
+    }
+
+    setError('')
+    releaseWebcam()
+    setWebcamInfo(buildEmptyWebcamInfo())
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: 'user',
+        },
+      })
+
+      const video = document.createElement('video')
+      video.autoplay = true
+      video.muted = true
+      video.playsInline = true
+      video.srcObject = stream
+
+      await new Promise((resolve, reject) => {
+        const cleanup = () => {
+          video.onloadedmetadata = null
+          video.onerror = null
+        }
+        if (video.readyState >= 1) {
+          cleanup()
+          resolve()
+          return
+        }
+        video.onloadedmetadata = () => {
+          cleanup()
+          resolve()
+        }
+        video.onerror = () => {
+          cleanup()
+          reject(new Error('Unable to start webcam preview.'))
+        }
+      })
+
+      await video.play().catch(() => undefined)
+
+      webcamStreamRef.current = stream
+      webcamVideoRef.current = video
+
+      const nextWebcamInfo = {
+        ready: true,
+        width: video.videoWidth || 1280,
+        height: video.videoHeight || 720,
+      }
+
+      syncRenderState({ image: null, sourceKind: 'webcam' })
+      setSourceKind('webcam')
+      setImage(null)
+      setSourceUrl('')
+      setModelName('')
+      setFitMode('contain')
+      setWebcamInfo(nextWebcamInfo)
+      requestRender()
+    } catch (webcamError) {
+      releaseWebcam()
+      setWebcamInfo(buildEmptyWebcamInfo())
+      setError(
+        webcamError instanceof Error
+          ? webcamError.message
+          : 'Unable to access the webcam.',
+      )
+    }
+  }
+
   const handleImageUpload = async (event) => {
     const file = event.target.files?.[0]
     event.target.value = ''
@@ -474,6 +614,8 @@ function App() {
     }
 
     setError('')
+    releaseWebcam()
+    setWebcamInfo(buildEmptyWebcamInfo())
     syncRenderState({ image: null, sourceKind: 'image' })
     setSourceKind('image')
     setImage(null)
@@ -494,6 +636,8 @@ function App() {
     }
 
     setError('')
+    releaseWebcam()
+    setWebcamInfo(buildEmptyWebcamInfo())
     invalidateModelPreview()
     try {
       await modelViewerRef.current.loadModel(file, modelConfig)
@@ -656,13 +800,24 @@ function App() {
               <span>Upload 3D</span>
               <input accept=".obj,.gltf,.glb,model/gltf-binary,model/gltf+json" onChange={handleModelUpload} type="file" />
             </label>
+            <button
+              className="upload-card source-action"
+              onClick={sourceKind === 'webcam' ? stopWebcam : startWebcam}
+              type="button"
+            >
+              <span>{sourceKind === 'webcam' ? 'Stop webcam' : 'Use webcam'}</span>
+            </button>
           </div>
           <p className="source-caption">
             {sourceKind === 'model'
               ? `3D source: ${modelName}`
+              : sourceKind === 'webcam'
+                ? webcamInfo.ready
+                  ? `Webcam live · ${webcamInfo.width} × ${webcamInfo.height}`
+                  : 'Starting webcam…'
               : sourceKind === 'image'
                 ? 'Image source loaded'
-                : 'Supports PNG, JPG, OBJ, GLTF, and GLB.'}
+                : 'Supports PNG, JPG, OBJ, GLTF, GLB, and webcam.'}
           </p>
           {error ? <p className="error-text">{error}</p> : null}
         </div>
@@ -897,9 +1052,13 @@ function App() {
             <span>
               {sourceKind === 'model'
                 ? 'Drag to orbit the model.'
+                : sourceKind === 'webcam'
+                  ? webcamInfo.ready
+                    ? `${webcamInfo.width} × ${webcamInfo.height} live`
+                    : 'Waiting for webcam access.'
                 : image
                   ? `${image.width} × ${image.height}`
-                  : 'Upload an image or a 3D model to start.'}
+                  : 'Upload an image, upload a 3D model, or use your webcam.'}
             </span>
           </div>
           <button className="button button-muted" onClick={() => setFitMode((current) => (current === 'contain' ? 'cover' : 'contain'))} type="button">
@@ -911,7 +1070,7 @@ function App() {
           {!hasSource ? (
             <div className="empty-state">
               <p>No source loaded</p>
-              <span>Upload an image or 3D file, then pick an effect.</span>
+              <span>Upload an image, upload a 3D file, or start your webcam.</span>
             </div>
           ) : null}
 

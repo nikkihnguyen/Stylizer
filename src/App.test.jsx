@@ -127,6 +127,10 @@ const clickToggle = (label) => {
   fireEvent.click(toggle)
 }
 
+const clickSourceAction = (label) => {
+  fireEvent.click(screen.getByRole('button', { name: label }))
+}
+
 const uploadImage = async () => {
   const file = new File(['image'], 'frame.png', { type: 'image/png' })
   await act(async () => {
@@ -333,5 +337,43 @@ describe('App rendering regressions', () => {
     expect(
       screen.getByText('3D preview unavailable: Error creating WebGL context.'),
     ).toBeInTheDocument()
+  })
+
+  it('starts the webcam as a live source and renders it through the effect pipeline', async () => {
+    createModelViewer.mockReturnValue(createViewerMock())
+    const { container } = render(<App />)
+    setPreviewRect(container)
+
+    clickSourceAction('Use webcam')
+    await flushMicrotasks()
+    await flushFrame(0)
+
+    expect(screen.getByText('Webcam live · 1280 × 720')).toBeInTheDocument()
+    expect(getLastRenderCall()).toMatchObject({
+      effectId: 'color-htone',
+      height: 720,
+      width: 1280,
+    })
+    expect(getLastRenderCall().image.tagName).toBe('VIDEO')
+  })
+
+  it('stops webcam tracks when the webcam source is turned off', async () => {
+    const track = { stop: vi.fn() }
+    navigator.mediaDevices.getUserMedia.mockResolvedValueOnce({
+      getTracks: () => [track],
+    })
+    createModelViewer.mockReturnValue(createViewerMock())
+
+    const { container } = render(<App />)
+    setPreviewRect(container)
+
+    clickSourceAction('Use webcam')
+    await flushMicrotasks()
+    await flushFrame(0)
+
+    clickSourceAction('Stop webcam')
+
+    expect(track.stop).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('No source loaded')).toBeInTheDocument()
   })
 })

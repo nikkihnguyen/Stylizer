@@ -53,12 +53,51 @@ beforeAll(() => {
     }
   }
 
+  Object.defineProperty(HTMLMediaElement.prototype, 'srcObject', {
+    configurable: true,
+    get() {
+      return this._srcObject ?? null
+    },
+    set(value) {
+      this._srcObject = value
+      if (this.tagName === 'VIDEO' && value) {
+        Object.defineProperty(this, 'videoWidth', {
+          configurable: true,
+          value: 1280,
+        })
+        Object.defineProperty(this, 'videoHeight', {
+          configurable: true,
+          value: 720,
+        })
+        Object.defineProperty(this, 'readyState', {
+          configurable: true,
+          value: 2,
+        })
+        queueMicrotask(() => {
+          this.onloadedmetadata?.()
+        })
+      }
+    },
+  })
+
+  HTMLMediaElement.prototype.play = vi.fn(() => Promise.resolve())
+  HTMLMediaElement.prototype.pause = vi.fn()
+
   HTMLCanvasElement.prototype.getContext = vi.fn(() => ({
     clearRect: vi.fn(),
     drawImage: vi.fn(),
   }))
   HTMLCanvasElement.prototype.toDataURL = vi.fn(() => 'data:image/png;base64,export')
   HTMLAnchorElement.prototype.click = vi.fn()
+
+  Object.defineProperty(globalThis.navigator, 'mediaDevices', {
+    configurable: true,
+    value: {
+      getUserMedia: vi.fn(async () => ({
+        getTracks: () => [{ stop: vi.fn() }],
+      })),
+    },
+  })
 
   if (!globalThis.crypto?.randomUUID) {
     Object.defineProperty(globalThis, 'crypto', {
