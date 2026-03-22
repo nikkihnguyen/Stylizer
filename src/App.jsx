@@ -9,6 +9,11 @@ import {
 } from './config'
 import { drawDraftRegion, getRegionStyleLabel, makeRegionLabel, renderEffect } from './effects'
 import { createModelViewer } from './modelScene'
+import {
+  createWebcamTracker,
+  getTrackingModeLabel,
+  TRACKING_MODE_OPTIONS,
+} from './webcamTracker'
 
 const PANEL_COLOR_EFFECTS = new Set(['half-tone', 'retroman'])
 
@@ -18,8 +23,19 @@ const buildInitialTrackState = () => ({
   shape: EMPTY_REGION_STYLE.shape,
   style: EMPTY_REGION_STYLE.style,
   filter: EMPTY_REGION_STYLE.filter,
+  invertRegion: false,
+  invertScope: 'inside',
+  regionFilterIntensity: 100,
   connectionStyle: EMPTY_REGION_STYLE.connectionStyle,
   connectionRate: EMPTY_REGION_STYLE.connectionRate,
+  gestureControl: false,
+  gestureSensitivity: 100,
+  trackingMode: 'manual',
+  trackingConfidence: 55,
+  trackFingers: false,
+  fingerPadding: 36,
+  trackingFps: 8,
+  trackingSmoothing: 58,
 })
 
 const buildInitialModelConfig = () => ({
@@ -43,6 +59,78 @@ const buildEmptyWebcamInfo = () => ({
   width: 0,
   height: 0,
 })
+
+const buildTrackingStatus = () => ({
+  message: 'Manual regions only.',
+  state: 'idle',
+})
+
+const normalizeTrackedRegion = (region, trackState) => ({
+  ...region,
+  filter: trackState.filter,
+  filterIntensity: trackState.regionFilterIntensity,
+  invertRegion: trackState.invertRegion,
+  invertScope: trackState.invertScope,
+  shape: trackState.shape,
+  style: trackState.style,
+})
+
+const trackingModeSupportsHands = (mode) => mode === 'hands' || mode === 'hands-face'
+const describeTrackingMode = (trackState) =>
+  trackState.trackFingers && trackingModeSupportsHands(trackState.trackingMode)
+    ? `${getTrackingModeLabel(trackState.trackingMode)} + Fingers`
+    : getTrackingModeLabel(trackState.trackingMode)
+
+const GESTURE_CONTROL_TARGETS = {
+  'blur-suite': { key: 'intensity', label: 'Blur Strength', max: 100, min: 0, step: 1 },
+  'color-htone': { key: 'mix', label: 'Mix', max: 100, min: 0, step: 1 },
+  glassify: { key: 'radius', label: 'Radius', max: 200, min: 10, step: 1 },
+  'ascii-kit': { key: 'coverage', label: 'Coverage', max: 100, min: 10, step: 1 },
+  'image-track': { key: 'strength', label: 'Strength', max: 100, min: 0, step: 1 },
+  'img-track': { key: 'regionFilterIntensity', label: 'Filter Intensity', max: 100, min: 0, source: 'track', step: 1 },
+  'half-tone': { key: 'dotSize', label: 'Dot Size', max: 20, min: 2, step: 1 },
+  retroman: { key: 'scale', label: 'Pixel Scale', max: 8, min: 1, step: 1 },
+  'glitch-kit': { key: 'intensity', label: 'Corruption', max: 100, min: 0, step: 1 },
+  'vintage-kit': { key: 'sepia', label: 'Sepia', max: 100, min: 0, step: 1 },
+}
+
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value))
+
+const getGestureControlTarget = (effectId) => GESTURE_CONTROL_TARGETS[effectId] ?? null
+
+const quantizeToStep = (value, min, max, step = 1) => {
+  const stepped = Math.round((value - min) / step) * step + min
+  return clamp(Number(stepped.toFixed(step < 1 ? 2 : 0)), min, max)
+}
+
+const mapPinchRatioToTargetValue = (pinchRatio, target, sensitivity) => {
+  const sensitivityScale = sensitivity / 100
+  const normalizedPinch = clamp(((pinchRatio * sensitivityScale) - 0.08) / 0.34, 0, 1)
+  return quantizeToStep(
+    target.min + normalizedPinch * (target.max - target.min),
+    target.min,
+    target.max,
+    target.step,
+  )
+}
+
+const roundRegionMetric = (value) => Math.round(value * 10) / 10
+
+const areRegionsEquivalent = (left, right) =>
+  left.length === right.length
+  && left.every((region, index) => {
+    const peer = right[index]
+    return (
+      region.id === peer.id
+      && region.label === peer.label
+      && region.trackingSource === peer.trackingSource
+      && roundRegionMetric(region.confidence ?? 0) === roundRegionMetric(peer.confidence ?? 0)
+      && roundRegionMetric(region.x) === roundRegionMetric(peer.x)
+      && roundRegionMetric(region.y) === roundRegionMetric(peer.y)
+      && roundRegionMetric(region.width) === roundRegionMetric(peer.width)
+      && roundRegionMetric(region.height) === roundRegionMetric(peer.height)
+    )
+  })
 
 const readFileAsUrl = (file) =>
   new Promise((resolve, reject) => {
@@ -123,6 +211,8 @@ function App() {
   const [trackState, setTrackState] = useState(buildInitialTrackState)
   const [modelConfig, setModelConfig] = useState(buildInitialModelConfig)
   const [regions, setRegions] = useState([])
+  const [trackedRegions, setTrackedRegions] = useState([])
+  const [trackingStatus, setTrackingStatus] = useState(buildTrackingStatus)
   const [selectedRegionId, setSelectedRegionId] = useState(null)
   const [draftRegion, setDraftRegion] = useState(null)
   const [drawing, setDrawing] = useState(null)
@@ -140,6 +230,9 @@ function App() {
   const effectCanvasRef = useRef(null)
   const webcamStreamRef = useRef(null)
   const webcamVideoRef = useRef(null)
+  const webcamTrackerRef = useRef(null)
+  const webcamTrackerPromiseRef = useRef(null)
+  const webcamTrackerLoadIdRef = useRef(0)
   const renderStateRef = useRef({
     draftRegion: null,
     effectId,
@@ -150,6 +243,7 @@ function App() {
     settings,
     sourceKind: null,
     trackState,
+    trackedRegions: [],
   })
   const renderMetricsRef = useRef({
     sourceWidth: 0,
@@ -160,6 +254,7 @@ function App() {
   const lowQualityUntilRef = useRef(0)
   const lastModelFrameRef = useRef(0)
   const lastWebcamFrameRef = useRef(0)
+  const lastTrackingFrameRef = useRef(0)
   const renderRequestedRef = useRef(true)
   const rafIdRef = useRef(0)
   const requestRenderRef = useRef(() => {})
@@ -172,13 +267,48 @@ function App() {
     }
   }, [])
 
-  const requestRender = (interactive = false) => {
+  const requestRender = useCallback((interactive = false) => {
     requestRenderRef.current(interactive)
-  }
+  }, [])
 
-  const invalidateModelPreview = () => {
+  const invalidateModelPreview = useCallback(() => {
     invalidateModelPreviewRef.current()
-  }
+  }, [])
+
+  const updateTrackedRegions = useCallback((nextTrackedRegions) => {
+    syncRenderState({ trackedRegions: nextTrackedRegions })
+    setTrackedRegions((currentRegions) =>
+      areRegionsEquivalent(currentRegions, nextTrackedRegions) ? currentRegions : nextTrackedRegions,
+    )
+  }, [syncRenderState])
+
+  const updateTrackingStatus = useCallback((state, message) => {
+    setTrackingStatus((currentStatus) =>
+      currentStatus.state === state && currentStatus.message === message
+        ? currentStatus
+        : { message, state },
+    )
+  }, [])
+
+  const loadWebcamTracker = useCallback(async () => {
+    if (webcamTrackerRef.current) {
+      return webcamTrackerRef.current
+    }
+
+    if (!webcamTrackerPromiseRef.current) {
+      webcamTrackerPromiseRef.current = createWebcamTracker()
+        .then((tracker) => {
+          webcamTrackerRef.current = tracker
+          return tracker
+        })
+        .catch((trackingError) => {
+          webcamTrackerPromiseRef.current = null
+          throw trackingError
+        })
+    }
+
+    return webcamTrackerPromiseRef.current
+  }, [])
 
   const releaseWebcam = useCallback(() => {
     const stream = webcamStreamRef.current
@@ -296,6 +426,123 @@ function App() {
           source = state.image
         }
 
+        let trackedRenderRegions = state.trackedRegions
+        let pinchGesture = null
+        if (
+          state.sourceKind === 'webcam'
+          && webcamReady
+          && state.trackState.trackingMode !== 'manual'
+          && (
+            state.effectId === 'img-track'
+            || (
+              state.trackState.gestureControl
+              && trackingModeSupportsHands(state.trackState.trackingMode)
+              && Boolean(getGestureControlTarget(state.effectId))
+            )
+          )
+          && webcamTrackerRef.current
+        ) {
+          const trackingFrameInterval = 1000 / Math.max(4, state.trackState.trackingFps)
+          if (
+            renderRequestedRef.current
+            || time - lastTrackingFrameRef.current >= trackingFrameInterval
+          ) {
+            try {
+              const trackingResult = webcamTrackerRef.current.detect(webcamVideo, time, {
+                fingerPadding: state.trackState.fingerPadding,
+                minConfidence: state.trackState.trackingConfidence / 100,
+                mode: state.trackState.trackingMode,
+                smoothing: state.trackState.trackingSmoothing / 100,
+                trackFingers: state.trackState.trackFingers && trackingModeSupportsHands(state.trackState.trackingMode),
+              })
+              trackedRenderRegions = Array.isArray(trackingResult)
+                ? trackingResult
+                : trackingResult.regions ?? []
+              pinchGesture = Array.isArray(trackingResult)
+                ? null
+                : trackingResult.pinch ?? null
+              lastTrackingFrameRef.current = time
+              updateTrackedRegions(trackedRenderRegions)
+              updateTrackingStatus('ready', `${describeTrackingMode(state.trackState)} tracking active.`)
+            } catch (trackingError) {
+              trackedRenderRegions = []
+              lastTrackingFrameRef.current = time
+              updateTrackedRegions([])
+              updateTrackingStatus(
+                'error',
+                trackingError instanceof Error
+                  ? trackingError.message
+                  : 'Unable to run webcam tracking.',
+              )
+            }
+          }
+        }
+
+        let currentTrackState = state.trackState
+        const gestureTarget = getGestureControlTarget(state.effectId)
+        let effectSettings = state.settings[state.effectId]
+        if (
+          state.sourceKind === 'webcam'
+          && state.trackState.gestureControl
+          && trackingModeSupportsHands(state.trackState.trackingMode)
+          && gestureTarget
+          && pinchGesture?.detected
+        ) {
+          const nextGestureValue = mapPinchRatioToTargetValue(
+            pinchGesture.ratio,
+            gestureTarget,
+            state.trackState.gestureSensitivity,
+          )
+          if (gestureTarget.source === 'track') {
+            if (state.trackState[gestureTarget.key] !== nextGestureValue) {
+              currentTrackState = {
+                ...state.trackState,
+                [gestureTarget.key]: nextGestureValue,
+              }
+              syncRenderState({ trackState: currentTrackState })
+              setTrackState(currentTrackState)
+            } else {
+              currentTrackState = {
+                ...state.trackState,
+                [gestureTarget.key]: nextGestureValue,
+              }
+            }
+          } else {
+            if (effectSettings[gestureTarget.key] !== nextGestureValue) {
+              const nextSettings = {
+                ...state.settings,
+                [state.effectId]: {
+                  ...state.settings[state.effectId],
+                  [gestureTarget.key]: nextGestureValue,
+                },
+              }
+              effectSettings = nextSettings[state.effectId]
+              syncRenderState({ settings: nextSettings })
+              setSettings(nextSettings)
+            } else {
+              effectSettings = {
+                ...effectSettings,
+                [gestureTarget.key]: nextGestureValue,
+              }
+            }
+          }
+        }
+        const effectiveTrackedRegions = trackedRenderRegions.map((region) =>
+          normalizeTrackedRegion(region, currentTrackState),
+        )
+        const renderRegions =
+          state.effectId === 'img-track'
+            ? [
+                ...effectiveTrackedRegions,
+                ...state.regions.map((region) => ({
+                  ...region,
+                  filterIntensity: currentTrackState.regionFilterIntensity,
+                  invertRegion: currentTrackState.invertRegion,
+                  invertScope: currentTrackState.invertScope,
+                })),
+              ]
+            : state.regions
+
         if (source && sourceWidth > 0 && sourceHeight > 0) {
           if (state.sourceKind === 'model') {
             if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
@@ -322,10 +569,10 @@ function App() {
             context: state.sourceKind === 'model' ? effectContext : displayContext,
             image: source,
             effectId: state.effectId,
-            settings: state.settings[state.effectId],
+            settings: effectSettings,
             width: sourceWidth,
             height: sourceHeight,
-            regions: state.regions,
+            regions: renderRegions,
             selectedRegionId: state.selectedRegionId,
             connectionStyle: state.trackState.connectionStyle,
             connectionRate: state.trackState.connectionRate,
@@ -383,6 +630,9 @@ function App() {
       requestRenderRef.current = () => {}
       invalidateModelPreviewRef.current = () => {}
       releaseWebcam()
+      webcamTrackerRef.current?.close()
+      webcamTrackerRef.current = null
+      webcamTrackerPromiseRef.current = null
       modelViewerRef.current = null
       if (rafIdRef.current) {
         cancelAnimationFrame(rafIdRef.current)
@@ -390,7 +640,7 @@ function App() {
       }
       viewer?.dispose()
     }
-  }, [releaseWebcam])
+  }, [releaseWebcam, syncRenderState, updateTrackedRegions, updateTrackingStatus])
 
   useEffect(() => {
     if (!sourceUrl) {
@@ -412,6 +662,100 @@ function App() {
   }, [sourceUrl, syncRenderState])
 
   useEffect(() => {
+    const gestureTarget = getGestureControlTarget(effectId)
+    const autoTrackingEnabled =
+      sourceKind === 'webcam'
+      && trackState.trackingMode !== 'manual'
+      && (
+        effectId === 'img-track'
+        || (
+          trackState.gestureControl
+          && trackingModeSupportsHands(trackState.trackingMode)
+          && Boolean(gestureTarget)
+        )
+      )
+
+    if (!autoTrackingEnabled) {
+      lastTrackingFrameRef.current = 0
+      updateTrackedRegions([])
+
+      if (trackState.trackingMode === 'manual') {
+        updateTrackingStatus('idle', 'Manual regions only.')
+      } else if (sourceKind !== 'webcam') {
+        updateTrackingStatus('idle', 'Auto tracking requires the webcam source.')
+      } else if (effectId !== 'img-track' && !trackState.gestureControl) {
+        updateTrackingStatus('idle', 'Switch to ImgTrack to render tracked regions.')
+      } else if (!gestureTarget) {
+        updateTrackingStatus('idle', 'The current effect does not expose a pinch-controlled intensity parameter.')
+      }
+      return
+    }
+
+    let cancelled = false
+    const loadId = webcamTrackerLoadIdRef.current + 1
+    webcamTrackerLoadIdRef.current = loadId
+    const effectTrackingDescriptor =
+      trackState.trackFingers && trackingModeSupportsHands(trackState.trackingMode)
+        ? `${getTrackingModeLabel(trackState.trackingMode)} + Fingers`
+        : getTrackingModeLabel(trackState.trackingMode)
+    updateTrackingStatus(
+      'loading',
+      `Loading ${effectTrackingDescriptor.toLowerCase()} tracking…`,
+    )
+
+    const primeTracker = async () => {
+      try {
+        const tracker = await loadWebcamTracker()
+        await tracker.ensure({
+          minConfidence: trackState.trackingConfidence / 100,
+          mode: trackState.trackingMode,
+        })
+
+        if (cancelled || webcamTrackerLoadIdRef.current !== loadId) {
+          return
+        }
+
+        lastTrackingFrameRef.current = Number.NEGATIVE_INFINITY
+        updateTrackingStatus(
+          'ready',
+          `${effectTrackingDescriptor} tracking active.`,
+        )
+        requestRender()
+      } catch (trackingError) {
+        if (cancelled || webcamTrackerLoadIdRef.current !== loadId) {
+          return
+        }
+
+        updateTrackedRegions([])
+        updateTrackingStatus(
+          'error',
+          trackingError instanceof Error
+            ? trackingError.message
+            : 'Unable to start webcam tracking.',
+        )
+      }
+    }
+
+    primeTracker()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    effectId,
+    loadWebcamTracker,
+    requestRender,
+    sourceKind,
+    trackState.gestureControl,
+    trackState.gestureSensitivity,
+    trackState.trackingConfidence,
+    trackState.trackFingers,
+    trackState.trackingMode,
+    updateTrackedRegions,
+    updateTrackingStatus,
+  ])
+
+  useEffect(() => {
     syncRenderState({
       draftRegion,
       effectId,
@@ -422,9 +766,10 @@ function App() {
       settings,
       sourceKind,
       trackState,
+      trackedRegions,
     })
     requestRenderRef.current(sourceKind === 'model')
-  }, [draftRegion, effectId, image, modelConfig, regions, selectedRegionId, settings, sourceKind, syncRenderState, trackState])
+  }, [draftRegion, effectId, image, modelConfig, regions, selectedRegionId, settings, sourceKind, syncRenderState, trackState, trackedRegions])
 
   const currentEffect = EFFECTS.find((effect) => effect.id === effectId)
   const currentSettings = settings[effectId]
@@ -436,6 +781,36 @@ function App() {
       : sourceKind === 'webcam'
         ? webcamInfo.ready
         : Boolean(image)
+  const visibleTrackedRegions = trackedRegions.map((region) =>
+    normalizeTrackedRegion(region, trackState),
+  )
+  const trackingModeLabel = getTrackingModeLabel(trackState.trackingMode)
+  const trackingDescriptor = describeTrackingMode(trackState)
+  const gestureControlTarget = getGestureControlTarget(effectId)
+  const trackingSummary =
+    trackState.trackingMode === 'manual'
+      ? 'Manual regions only.'
+      : trackingStatus.state === 'error'
+        ? trackingStatus.message
+        : sourceKind !== 'webcam'
+          ? 'Auto tracking requires the webcam source.'
+          : trackingStatus.state === 'loading'
+            ? trackingStatus.message
+            : visibleTrackedRegions.length > 0
+              ? `${trackingDescriptor} tracking live · ${visibleTrackedRegions.length} region${visibleTrackedRegions.length === 1 ? '' : 's'}`
+              : trackState.trackFingers && trackingModeSupportsHands(trackState.trackingMode)
+                ? `${trackingDescriptor} tracking active · waiting for a face, hand, or fingers.`
+                : `${trackingModeLabel} tracking active · waiting for a face or hands.`
+  const gestureSummary =
+    sourceKind !== 'webcam'
+      ? 'Pinch control requires the webcam source.'
+      : !trackingModeSupportsHands(trackState.trackingMode)
+        ? 'Pinch control requires a hand-based tracking mode.'
+        : !gestureControlTarget
+          ? 'The current effect does not expose a pinch-controlled intensity parameter.'
+          : trackState.gestureControl
+            ? `Pinch thumb and index to control ${gestureControlTarget.label}.`
+            : `Use thumb and index pinch to control ${gestureControlTarget.label}.`
 
   const updateSetting = (key, value) => {
     const nextSettings = {
@@ -519,6 +894,9 @@ function App() {
 
   const stopWebcam = () => {
     releaseWebcam()
+    lastTrackingFrameRef.current = 0
+    updateTrackedRegions([])
+    updateTrackingStatus('idle', trackState.trackingMode === 'manual' ? 'Manual regions only.' : 'Auto tracking requires the webcam source.')
     syncRenderState({ image: null, sourceKind: null })
     setSourceKind(null)
     setImage(null)
@@ -536,6 +914,8 @@ function App() {
 
     setError('')
     releaseWebcam()
+    lastTrackingFrameRef.current = 0
+    updateTrackedRegions([])
     setWebcamInfo(buildEmptyWebcamInfo())
 
     try {
@@ -590,6 +970,12 @@ function App() {
       setModelName('')
       setFitMode('contain')
       setWebcamInfo(nextWebcamInfo)
+      updateTrackingStatus(
+        trackState.trackingMode === 'manual' ? 'idle' : 'loading',
+        trackState.trackingMode === 'manual'
+          ? 'Manual regions only.'
+          : `Loading ${describeTrackingMode(trackState).toLowerCase()} tracking…`,
+      )
       requestRender()
     } catch (webcamError) {
       releaseWebcam()
@@ -615,6 +1001,9 @@ function App() {
 
     setError('')
     releaseWebcam()
+    lastTrackingFrameRef.current = 0
+    updateTrackedRegions([])
+    updateTrackingStatus('idle', trackState.trackingMode === 'manual' ? 'Manual regions only.' : 'Auto tracking requires the webcam source.')
     setWebcamInfo(buildEmptyWebcamInfo())
     syncRenderState({ image: null, sourceKind: 'image' })
     setSourceKind('image')
@@ -637,6 +1026,9 @@ function App() {
 
     setError('')
     releaseWebcam()
+    lastTrackingFrameRef.current = 0
+    updateTrackedRegions([])
+    updateTrackingStatus('idle', trackState.trackingMode === 'manual' ? 'Manual regions only.' : 'Auto tracking requires the webcam source.')
     setWebcamInfo(buildEmptyWebcamInfo())
     invalidateModelPreview()
     try {
@@ -689,6 +1081,8 @@ function App() {
         y: point.y,
         width: 0,
         height: 0,
+        invertRegion: trackState.invertRegion,
+        invertScope: trackState.invertScope,
         shape: trackState.shape,
         style: trackState.style,
         filter: trackState.filter,
@@ -719,6 +1113,8 @@ function App() {
         y,
         width,
         height,
+        invertRegion: trackState.invertRegion,
+        invertScope: trackState.invertScope,
         shape: trackState.shape,
         style: trackState.style,
         filter: trackState.filter,
@@ -742,6 +1138,8 @@ function App() {
           y: draftRegion.y,
           width: draftRegion.width,
           height: draftRegion.height,
+          invertRegion: trackState.invertRegion,
+          invertScope: trackState.invertScope,
           shape: trackState.shape,
           style: trackState.style,
           filter: trackState.filter,
@@ -821,6 +1219,49 @@ function App() {
           </p>
           {error ? <p className="error-text">{error}</p> : null}
         </div>
+
+        {sourceKind === 'webcam' ? (
+          <div className="sidebar-block">
+            <SectionTitle>Webcam Tracking</SectionTitle>
+            <SectionTitle>Tracking Mode</SectionTitle>
+            <SegmentedControl
+              onChange={(value) => updateTrackState('trackingMode', value)}
+              options={TRACKING_MODE_OPTIONS}
+              value={trackState.trackingMode}
+            />
+            {trackState.trackingMode !== 'manual' ? (
+              <>
+                <SliderControl label="Detection Confidence" max={90} min={30} onChange={(value) => updateTrackState('trackingConfidence', value)} value={trackState.trackingConfidence} />
+                <SliderControl label="Tracking FPS" max={18} min={4} onChange={(value) => updateTrackState('trackingFps', value)} value={trackState.trackingFps} />
+                <SliderControl label="Stability" max={90} min={0} onChange={(value) => updateTrackState('trackingSmoothing', value)} value={trackState.trackingSmoothing} />
+              </>
+            ) : null}
+            <SectionTitle>Finger Tracking</SectionTitle>
+            {trackingModeSupportsHands(trackState.trackingMode) ? (
+              <>
+                <ToggleControl checked={trackState.trackFingers} label="Track Fingers" onChange={(value) => updateTrackState('trackFingers', value)} />
+                {trackState.trackFingers ? (
+                  <SliderControl label="Finger Padding" max={80} min={10} onChange={(value) => updateTrackState('fingerPadding', value)} value={trackState.fingerPadding} />
+                ) : null}
+              </>
+            ) : (
+              <p className="info-text">Select `Hands` or `Hands + Face` to enable finger regions.</p>
+            )}
+            <SectionTitle>Gesture Control</SectionTitle>
+            {trackingModeSupportsHands(trackState.trackingMode) && gestureControlTarget ? (
+              <>
+                <ToggleControl checked={trackState.gestureControl} label="Use Pinch For Effect" onChange={(value) => updateTrackState('gestureControl', value)} />
+                {trackState.gestureControl ? (
+                  <SliderControl label="Pinch Sensitivity" max={160} min={40} onChange={(value) => updateTrackState('gestureSensitivity', value)} value={trackState.gestureSensitivity} />
+                ) : null}
+              </>
+            ) : null}
+            <p className={`info-text ${trackingStatus.state === 'error' ? 'is-error' : ''}`}>
+              {trackingSummary}
+            </p>
+            <p className="info-text">{gestureSummary}</p>
+          </div>
+        ) : null}
 
         {sourceKind === 'model' ? (
           <div className="sidebar-block">
@@ -1009,10 +1450,25 @@ function App() {
 
           {effectId === 'img-track' ? (
             <>
+              <SliderControl label="Filter Intensity" max={100} min={0} onChange={(value) => updateTrackState('regionFilterIntensity', value)} value={trackState.regionFilterIntensity} />
               <SectionTitle>Shape</SectionTitle>
               <SegmentedControl onChange={(value) => updateTrackState('shape', value)} options={[{ label: 'Rectangle', value: 'rectangle' }, { label: 'Circle', value: 'circle' }, { label: 'Ellipse', value: 'ellipse' }]} value={trackState.shape} />
               <SectionTitle>Region Style</SectionTitle>
               <SegmentedControl onChange={(value) => updateTrackState('style', value)} options={REGION_STYLES.map((style) => ({ label: style.label, value: style.id }))} value={trackState.style} />
+              <ToggleControl checked={trackState.invertRegion} label="Invert Region" onChange={(value) => updateTrackState('invertRegion', value)} />
+              {trackState.invertRegion ? (
+                <>
+                  <SectionTitle>Invert Scope</SectionTitle>
+                  <SegmentedControl
+                    onChange={(value) => updateTrackState('invertScope', value)}
+                    options={[
+                      { label: 'Inside', value: 'inside' },
+                      { label: 'Outside', value: 'outside' },
+                    ]}
+                    value={trackState.invertScope}
+                  />
+                </>
+              ) : null}
               <SectionTitle>Filter Effects</SectionTitle>
               <SegmentedControl onChange={(value) => updateTrackState('filter', value)} options={REGION_FILTERS.map((filter) => ({ label: filter.label, value: filter.id }))} value={trackState.filter} />
               <SectionTitle>Connections</SectionTitle>
@@ -1022,9 +1478,23 @@ function App() {
           ) : null}
         </div>
 
+        {effectId === 'img-track' && visibleTrackedRegions.length > 0 ? (
+          <div className="sidebar-block">
+            <SectionTitle>Tracked Regions ({visibleTrackedRegions.length})</SectionTitle>
+            <div className="region-list">
+              {visibleTrackedRegions.map((region) => (
+                <div key={region.id} className="region-row region-row-static">
+                  <span>{region.label}</span>
+                  <span>{region.trackingSource} · {Math.round((region.confidence ?? 0) * 100)}%</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         {effectId === 'img-track' && regions.length > 0 ? (
           <div className="sidebar-block">
-            <SectionTitle>Regions ({regions.length})</SectionTitle>
+            <SectionTitle>Manual Regions ({regions.length})</SectionTitle>
             <div className="region-list">
               {regions.map((region) => (
                 <button key={region.id} className={`region-row ${region.id === selectedRegionId ? 'is-active' : ''}`} onClick={() => selectRegion(region.id)} type="button">
@@ -1054,7 +1524,9 @@ function App() {
                 ? 'Drag to orbit the model.'
                 : sourceKind === 'webcam'
                   ? webcamInfo.ready
-                    ? `${webcamInfo.width} × ${webcamInfo.height} live`
+                    ? effectId === 'img-track' && trackState.trackingMode !== 'manual'
+                      ? `${webcamInfo.width} × ${webcamInfo.height} live · ${trackingDescriptor}`
+                      : `${webcamInfo.width} × ${webcamInfo.height} live`
                     : 'Waiting for webcam access.'
                 : image
                   ? `${image.width} × ${image.height}`

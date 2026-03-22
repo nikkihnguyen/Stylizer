@@ -15,9 +15,26 @@ vi.mock('./effects', async () => {
   }
 })
 
+vi.mock('./webcamTracker', () => ({
+  TRACKING_MODE_OPTIONS: [
+    { label: 'Manual', value: 'manual' },
+    { label: 'Hands', value: 'hands' },
+    { label: 'Face', value: 'face' },
+    { label: 'Hands + Face', value: 'hands-face' },
+  ],
+  createWebcamTracker: vi.fn(),
+  getTrackingModeLabel: vi.fn((mode) => ({
+    manual: 'Manual',
+    hands: 'Hands',
+    face: 'Face',
+    'hands-face': 'Hands + Face',
+  }[mode] ?? mode)),
+}))
+
 import App from './App'
 import { renderEffect } from './effects'
 import { createModelViewer } from './modelScene'
+import { createWebcamTracker } from './webcamTracker'
 
 const makeRect = (width, height) => ({
   width,
@@ -52,6 +69,12 @@ const createViewerMock = () => {
   }
 }
 
+const createTrackerMock = () => ({
+  close: vi.fn(),
+  detect: vi.fn(() => []),
+  ensure: vi.fn().mockResolvedValue(undefined),
+})
+
 let rafQueue = []
 let rafId = 1
 let performanceNow = 0
@@ -75,6 +98,8 @@ beforeEach(() => {
   globalThis.cancelAnimationFrame = vi.fn((id) => {
     rafQueue = rafQueue.filter((entry) => entry.id !== id)
   })
+
+  createWebcamTracker.mockResolvedValue(createTrackerMock())
 })
 
 const flushMicrotasks = async (turns = 5) => {
@@ -357,6 +382,21 @@ describe('App rendering regressions', () => {
     expect(getLastRenderCall().image.tagName).toBe('VIDEO')
   })
 
+  it('shows how to enable finger tracking before a hand-based mode is selected', async () => {
+    createModelViewer.mockReturnValue(createViewerMock())
+
+    const { container } = render(<App />)
+    setPreviewRect(container)
+
+    clickSourceAction('Use webcam')
+    await flushMicrotasks()
+    await flushFrame(0)
+
+    expect(
+      screen.getByText('Select `Hands` or `Hands + Face` to enable finger regions.'),
+    ).toBeInTheDocument()
+  })
+
   it('stops webcam tracks when the webcam source is turned off', async () => {
     const track = { stop: vi.fn() }
     navigator.mediaDevices.getUserMedia.mockResolvedValueOnce({
@@ -375,5 +415,382 @@ describe('App rendering regressions', () => {
 
     expect(track.stop).toHaveBeenCalledTimes(1)
     expect(screen.getByText('No source loaded')).toBeInTheDocument()
+  })
+
+  it('detects webcam hands and faces for ImgTrack and renders tracked regions', async () => {
+    const tracker = createTrackerMock()
+    tracker.detect.mockReturnValue([
+      {
+        confidence: 0.92,
+        height: 180,
+        id: 'tracked-face-1',
+        kind: 'tracked',
+        label: 'Face 1',
+        trackingSource: 'face',
+        width: 180,
+        x: 160,
+        y: 120,
+      },
+      {
+        confidence: 0.84,
+        height: 140,
+        id: 'tracked-left-1',
+        kind: 'tracked',
+        label: 'Left Hand',
+        trackingSource: 'hand',
+        width: 140,
+        x: 40,
+        y: 260,
+      },
+    ])
+    createWebcamTracker.mockResolvedValue(tracker)
+    createModelViewer.mockReturnValue(createViewerMock())
+
+    const { container } = render(<App />)
+    setPreviewRect(container)
+
+    clickSourceAction('Use webcam')
+    await flushMicrotasks()
+    await flushFrame(0)
+
+    renderEffect.mockClear()
+
+    fireEvent.click(screen.getByRole('button', { name: 'ImgTrack' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Hands + Face' }))
+    await flushMicrotasks()
+    await flushFrame(16)
+
+    expect(tracker.ensure).toHaveBeenCalledWith({
+      minConfidence: 0.55,
+      mode: 'hands-face',
+    })
+    expect(tracker.detect).toHaveBeenCalled()
+    expect(getLastRenderCall()).toMatchObject({
+      effectId: 'img-track',
+      regions: expect.arrayContaining([
+        expect.objectContaining({
+          filter: 'none',
+          label: 'Face 1',
+          style: 'basic',
+          trackingSource: 'face',
+        }),
+        expect.objectContaining({
+          label: 'Left Hand',
+          shape: 'rectangle',
+          trackingSource: 'hand',
+        }),
+      ]),
+    })
+    expect(screen.getByText('Tracked Regions (2)')).toBeInTheDocument()
+    expect(screen.getByText('Hands + Face tracking live · 2 regions')).toBeInTheDocument()
+  })
+
+  it('adds finger regions on top of hand tracking when finger tracking is enabled', async () => {
+    const tracker = createTrackerMock()
+    tracker.detect.mockReturnValue([
+      {
+        confidence: 0.88,
+        height: 140,
+        id: 'tracked-left-1',
+        kind: 'tracked',
+        label: 'Left Hand',
+        trackingSource: 'hand',
+        width: 140,
+        x: 40,
+        y: 260,
+      },
+      {
+        confidence: 0.88,
+        height: 42,
+        id: 'tracked-left-thumb',
+        kind: 'tracked',
+        label: 'Left Thumb',
+        trackingSource: 'finger',
+        width: 38,
+        x: 28,
+        y: 232,
+      },
+      {
+        confidence: 0.88,
+        height: 48,
+        id: 'tracked-left-index',
+        kind: 'tracked',
+        label: 'Left Index',
+        trackingSource: 'finger',
+        width: 36,
+        x: 52,
+        y: 214,
+      },
+      {
+        confidence: 0.88,
+        height: 52,
+        id: 'tracked-left-middle',
+        kind: 'tracked',
+        label: 'Left Middle',
+        trackingSource: 'finger',
+        width: 34,
+        x: 74,
+        y: 205,
+      },
+      {
+        confidence: 0.88,
+        height: 46,
+        id: 'tracked-left-ring',
+        kind: 'tracked',
+        label: 'Left Ring',
+        trackingSource: 'finger',
+        width: 32,
+        x: 94,
+        y: 215,
+      },
+      {
+        confidence: 0.88,
+        height: 40,
+        id: 'tracked-left-pinky',
+        kind: 'tracked',
+        label: 'Left Pinky',
+        trackingSource: 'finger',
+        width: 28,
+        x: 112,
+        y: 226,
+      },
+    ])
+    createWebcamTracker.mockResolvedValue(tracker)
+    createModelViewer.mockReturnValue(createViewerMock())
+
+    const { container } = render(<App />)
+    setPreviewRect(container)
+
+    clickSourceAction('Use webcam')
+    await flushMicrotasks()
+    await flushFrame(0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'ImgTrack' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Hands' }))
+    await flushMicrotasks()
+    await flushFrame(16)
+
+    clickToggle('Track Fingers')
+    await flushMicrotasks()
+    await flushFrame(160)
+
+    expect(tracker.detect).toHaveBeenLastCalledWith(
+      expect.any(HTMLVideoElement),
+      160,
+      expect.objectContaining({
+        fingerPadding: 36,
+        minConfidence: 0.55,
+        mode: 'hands',
+        smoothing: 0.58,
+        trackFingers: true,
+      }),
+    )
+    expect(getLastRenderCall()).toMatchObject({
+      effectId: 'img-track',
+      regions: expect.arrayContaining([
+        expect.objectContaining({
+          label: 'Left Hand',
+          trackingSource: 'hand',
+        }),
+        expect.objectContaining({
+          label: 'Left Thumb',
+          trackingSource: 'finger',
+        }),
+        expect.objectContaining({
+          label: 'Left Index',
+          trackingSource: 'finger',
+        }),
+      ]),
+    })
+    expect(screen.getByText('Tracked Regions (6)')).toBeInTheDocument()
+    expect(screen.getByText('Hands + Fingers tracking live · 6 regions')).toBeInTheDocument()
+  })
+
+  it('uses thumb and index pinch distance to drive the active effect intensity', async () => {
+    const tracker = createTrackerMock()
+    tracker.detect.mockReturnValue({
+      pinch: {
+        confidence: 0.94,
+        detected: true,
+        handedness: 'Left',
+        ratio: 0.25,
+      },
+      regions: [],
+    })
+    createWebcamTracker.mockResolvedValue(tracker)
+    createModelViewer.mockReturnValue(createViewerMock())
+
+    const { container } = render(<App />)
+    setPreviewRect(container)
+
+    clickSourceAction('Use webcam')
+    await flushMicrotasks()
+    await flushFrame(0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Blur' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Hands' }))
+    await flushMicrotasks()
+    await flushFrame(16)
+
+    clickToggle('Use Pinch For Effect')
+    await flushMicrotasks()
+    await flushFrame(160)
+
+    expect(getLastRenderCall()).toMatchObject({
+      effectId: 'blur-suite',
+      settings: expect.objectContaining({
+        intensity: 50,
+      }),
+    })
+    expect(screen.getByText('Pinch thumb and index to control Blur Strength.')).toBeInTheDocument()
+  })
+
+  it('uses thumb and index pinch distance to drive ImgTrack filter intensity inside tracked regions', async () => {
+    const tracker = createTrackerMock()
+    tracker.detect.mockReturnValue({
+      pinch: {
+        confidence: 0.91,
+        detected: true,
+        handedness: 'Left',
+        ratio: 0.25,
+      },
+      regions: [
+        {
+          confidence: 0.86,
+          height: 140,
+          id: 'tracked-left-1',
+          kind: 'tracked',
+          label: 'Left Hand',
+          trackingSource: 'hand',
+          width: 140,
+          x: 40,
+          y: 260,
+        },
+      ],
+    })
+    createWebcamTracker.mockResolvedValue(tracker)
+    createModelViewer.mockReturnValue(createViewerMock())
+
+    const { container } = render(<App />)
+    setPreviewRect(container)
+
+    clickSourceAction('Use webcam')
+    await flushMicrotasks()
+    await flushFrame(0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'ImgTrack' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Hands' }))
+    await flushMicrotasks()
+    await flushFrame(16)
+
+    clickToggle('Use Pinch For Effect')
+    await flushMicrotasks()
+    await flushFrame(160)
+
+    expect(getSliderInput('Filter Intensity').value).toBe('50')
+    expect(getLastRenderCall()).toMatchObject({
+      effectId: 'img-track',
+      regions: expect.arrayContaining([
+        expect.objectContaining({
+          filterIntensity: 50,
+          label: 'Left Hand',
+          trackingSource: 'hand',
+        }),
+      ]),
+    })
+    expect(screen.getByText('Pinch thumb and index to control Filter Intensity.')).toBeInTheDocument()
+  })
+
+  it('applies the ImgTrack invert-region toggle to tracked regions', async () => {
+    const tracker = createTrackerMock()
+    tracker.detect.mockReturnValue({
+      pinch: null,
+      regions: [
+        {
+          confidence: 0.86,
+          height: 140,
+          id: 'tracked-left-1',
+          kind: 'tracked',
+          label: 'Left Hand',
+          trackingSource: 'hand',
+          width: 140,
+          x: 40,
+          y: 260,
+        },
+      ],
+    })
+    createWebcamTracker.mockResolvedValue(tracker)
+    createModelViewer.mockReturnValue(createViewerMock())
+
+    const { container } = render(<App />)
+    setPreviewRect(container)
+
+    clickSourceAction('Use webcam')
+    await flushMicrotasks()
+    await flushFrame(0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'ImgTrack' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Hands' }))
+    await flushMicrotasks()
+    await flushFrame(16)
+
+    clickToggle('Invert Region')
+    await flushMicrotasks()
+    await flushFrame(160)
+
+    expect(getLastRenderCall()).toMatchObject({
+      effectId: 'img-track',
+      regions: expect.arrayContaining([
+        expect.objectContaining({
+          invertRegion: true,
+          label: 'Left Hand',
+          trackingSource: 'hand',
+        }),
+      ]),
+    })
+  })
+
+  it('clears tracked webcam regions when switching ImgTrack back to manual mode', async () => {
+    const tracker = createTrackerMock()
+    tracker.detect.mockReturnValue([
+      {
+        confidence: 0.89,
+        height: 180,
+        id: 'tracked-face-1',
+        kind: 'tracked',
+        label: 'Face 1',
+        trackingSource: 'face',
+        width: 180,
+        x: 160,
+        y: 120,
+      },
+    ])
+    createWebcamTracker.mockResolvedValue(tracker)
+    createModelViewer.mockReturnValue(createViewerMock())
+
+    const { container } = render(<App />)
+    setPreviewRect(container)
+
+    clickSourceAction('Use webcam')
+    await flushMicrotasks()
+    await flushFrame(0)
+
+    fireEvent.click(screen.getByRole('button', { name: 'ImgTrack' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Face' }))
+    await flushMicrotasks()
+    await flushFrame(16)
+
+    expect(screen.getByText('Tracked Regions (1)')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Manual' }))
+    await flushMicrotasks()
+    await flushFrame(32)
+
+    expect(screen.queryByText('Tracked Regions (1)')).not.toBeInTheDocument()
+    expect(screen.getByText('Manual regions only.')).toBeInTheDocument()
+    expect(getLastRenderCall()).toMatchObject({
+      effectId: 'img-track',
+      regions: [],
+    })
   })
 })

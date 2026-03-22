@@ -212,7 +212,9 @@ const drawAscii = (context, source, width, height, settings, now) => {
 }
 
 const applyRegionFilter = (context, region, width, height) => {
-  if (region.filter === 'none') {
+  const shouldInvertRegion = region.invertRegion ?? false
+  const shouldInvertInside = shouldInvertRegion && (region.invertScope ?? 'inside') !== 'outside'
+  if (region.filter === 'none' && !shouldInvertInside) {
     return
   }
 
@@ -226,250 +228,322 @@ const applyRegionFilter = (context, region, width, height) => {
 
   const imageData = context.getImageData(startX, startY, regionWidth, regionHeight)
   const { data } = imageData
+  const original = new Uint8ClampedArray(data)
+  const filterIntensity = clamp((region.filterIntensity ?? 100) / 100, 0, 1)
+  if (filterIntensity <= 0 && !shouldInvertInside) {
+    return
+  }
 
-  switch (region.filter) {
-    case 'inv':
-      for (let index = 0; index < data.length; index += 4) {
-        data[index] = 255 - data[index]
-        data[index + 1] = 255 - data[index + 1]
-        data[index + 2] = 255 - data[index + 2]
-      }
-      break
-    case 'glitch':
-      for (let index = 0; index < data.length; index += 4) {
-        if (Math.random() < 0.05) {
-          data[index] = clamp(data[index] + 100, 0, 255)
-          data[index + 1] = clamp(data[index + 1] - 50, 0, 255)
+  if (region.filter !== 'none' && filterIntensity > 0) {
+    switch (region.filter) {
+      case 'inv':
+        for (let index = 0; index < data.length; index += 4) {
+          data[index] = 255 - data[index]
+          data[index + 1] = 255 - data[index + 1]
+          data[index + 2] = 255 - data[index + 2]
         }
-        if (Math.floor(index / 4 / regionWidth) % 8 < 2) {
-          const offset = (Math.floor(Math.random() * 20) - 10) * 4
-          const target = clamp(index + offset, 0, data.length - 4)
-          data[index] = data[target]
-          data[index + 1] = data[target + 1]
-          data[index + 2] = data[target + 2]
-        }
-      }
-      break
-    case 'thermal':
-      for (let index = 0; index < data.length; index += 4) {
-        const normalized = luminance(data[index], data[index + 1], data[index + 2]) / 255
-        if (normalized < 0.25) {
-          data[index] = 0
-          data[index + 1] = 0
-          data[index + 2] = Math.floor(normalized * 4 * 255)
-        } else if (normalized < 0.5) {
-          data[index] = Math.floor((normalized - 0.25) * 4 * 255)
-          data[index + 1] = 0
-          data[index + 2] = 255
-        } else if (normalized < 0.75) {
-          data[index] = 255
-          data[index + 1] = Math.floor((normalized - 0.5) * 4 * 255)
-          data[index + 2] = Math.floor((0.75 - normalized) * 4 * 255)
-        } else {
-          data[index] = 255
-          data[index + 1] = 255
-          data[index + 2] = Math.floor((normalized - 0.75) * 4 * 255)
-        }
-      }
-      break
-    case 'pixel':
-      for (let y = 0; y < regionHeight; y += 8) {
-        for (let x = 0; x < regionWidth; x += 8) {
-          let totalR = 0
-          let totalG = 0
-          let totalB = 0
-          let count = 0
-          for (let offsetY = 0; offsetY < 8 && y + offsetY < regionHeight; offsetY += 1) {
-            for (let offsetX = 0; offsetX < 8 && x + offsetX < regionWidth; offsetX += 1) {
-              const base = ((y + offsetY) * regionWidth + (x + offsetX)) * 4
-              totalR += data[base]
-              totalG += data[base + 1]
-              totalB += data[base + 2]
-              count += 1
-            }
+        break
+      case 'glitch':
+        for (let index = 0; index < data.length; index += 4) {
+          if (Math.random() < 0.05) {
+            data[index] = clamp(data[index] + 100, 0, 255)
+            data[index + 1] = clamp(data[index + 1] - 50, 0, 255)
           }
-          const avgR = Math.floor(totalR / count)
-          const avgG = Math.floor(totalG / count)
-          const avgB = Math.floor(totalB / count)
-          for (let offsetY = 0; offsetY < 8 && y + offsetY < regionHeight; offsetY += 1) {
-            for (let offsetX = 0; offsetX < 8 && x + offsetX < regionWidth; offsetX += 1) {
-              const base = ((y + offsetY) * regionWidth + (x + offsetX)) * 4
-              data[base] = avgR
-              data[base + 1] = avgG
-              data[base + 2] = avgB
-            }
+          if (Math.floor(index / 4 / regionWidth) % 8 < 2) {
+            const offset = (Math.floor(Math.random() * 20) - 10) * 4
+            const target = clamp(index + offset, 0, data.length - 4)
+            data[index] = data[target]
+            data[index + 1] = data[target + 1]
+            data[index + 2] = data[target + 2]
           }
         }
-      }
-      break
-    case 'tone':
-      for (let index = 0; index < data.length; index += 4) {
-        const value = Math.floor(luminance(data[index], data[index + 1], data[index + 2]) / 64) * 64
-        data[index] = value
-        data[index + 1] = value
-        data[index + 2] = value
-      }
-      break
-    case 'blur': {
-      const copy = new Uint8ClampedArray(data)
-      for (let y = 3; y < regionHeight - 3; y += 1) {
-        for (let x = 3; x < regionWidth - 3; x += 1) {
-          let totalR = 0
-          let totalG = 0
-          let totalB = 0
-          let samples = 0
-          for (let offsetY = -3; offsetY <= 3; offsetY += 1) {
-            for (let offsetX = -3; offsetX <= 3; offsetX += 1) {
-              const base = ((y + offsetY) * regionWidth + (x + offsetX)) * 4
-              totalR += copy[base]
-              totalG += copy[base + 1]
-              totalB += copy[base + 2]
-              samples += 1
-            }
-          }
-          const base = (y * regionWidth + x) * 4
-          data[base] = totalR / samples
-          data[base + 1] = totalG / samples
-          data[base + 2] = totalB / samples
-        }
-      }
-      break
-    }
-    case 'dither':
-      for (let y = 0; y < regionHeight; y += 1) {
-        for (let x = 0; x < regionWidth; x += 1) {
-          const base = (y * regionWidth + x) * 4
-          const threshold = (BAYER_4X4[y % 4][x % 4] / 16) * 255
-          const value = luminance(data[base], data[base + 1], data[base + 2]) > threshold ? 255 : 0
-          data[base] = value
-          data[base + 1] = value
-          data[base + 2] = value
-        }
-      }
-      break
-    case 'zoom': {
-      const copy = new Uint8ClampedArray(data)
-      const centerX = regionWidth / 2
-      const centerY = regionHeight / 2
-      const maxDistance = Math.sqrt(centerX * centerX + centerY * centerY)
-      for (let y = 0; y < regionHeight; y += 1) {
-        for (let x = 0; x < regionWidth; x += 1) {
-          const offsetX = x - centerX
-          const offsetY = y - centerY
-          const distance = Math.sqrt(offsetX * offsetX + offsetY * offsetY)
-          const zoom = 1 + (distance / maxDistance) * 0.3
-          const sampleX = clamp(Math.round(centerX + offsetX / zoom), 0, regionWidth - 1)
-          const sampleY = clamp(Math.round(centerY + offsetY / zoom), 0, regionHeight - 1)
-          const sample = (sampleY * regionWidth + sampleX) * 4
-          const target = (y * regionWidth + x) * 4
-          data[target] = copy[sample]
-          data[target + 1] = copy[sample + 1]
-          data[target + 2] = copy[sample + 2]
-        }
-      }
-      break
-    }
-    case 'xray':
-      for (let index = 0; index < data.length; index += 4) {
-        const inverse = 255 - luminance(data[index], data[index + 1], data[index + 2])
-        data[index] = Math.floor(inverse * 0.7)
-        data[index + 1] = Math.floor(inverse * 0.85)
-        data[index + 2] = inverse
-      }
-      break
-    case 'water': {
-      const copy = new Uint8ClampedArray(data)
-      for (let y = 0; y < regionHeight; y += 1) {
-        for (let x = 0; x < regionWidth; x += 1) {
-          const waveX = Math.round(Math.sin(y * 0.15) * 5)
-          const waveY = Math.round(Math.cos(x * 0.15) * 5)
-          const sampleX = clamp(x + waveX, 0, regionWidth - 1)
-          const sampleY = clamp(y + waveY, 0, regionHeight - 1)
-          const sample = (sampleY * regionWidth + sampleX) * 4
-          const target = (y * regionWidth + x) * 4
-          data[target] = copy[sample]
-          data[target + 1] = copy[sample + 1]
-          data[target + 2] = copy[sample + 2]
-        }
-      }
-      break
-    }
-    case 'mask': {
-      const centerX = regionWidth / 2
-      const centerY = regionHeight / 2
-      const radius = Math.min(centerX, centerY)
-      for (let y = 0; y < regionHeight; y += 1) {
-        for (let x = 0; x < regionWidth; x += 1) {
-          const distance = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2)
-          if (distance > radius * 0.8) {
-            const fade = clamp((distance - radius * 0.8) / (radius * 0.2), 0, 1)
-            const base = (y * regionWidth + x) * 4
-            data[base] *= 1 - fade
-            data[base + 1] *= 1 - fade
-            data[base + 2] *= 1 - fade
-          }
-        }
-      }
-      break
-    }
-    case 'crt':
-      for (let y = 0; y < regionHeight; y += 1) {
-        for (let x = 0; x < regionWidth; x += 1) {
-          const base = (y * regionWidth + x) * 4
-          if (y % 3 === 0) {
-            data[base] *= 0.7
-            data[base + 1] *= 0.7
-            data[base + 2] *= 0.7
-          }
-          if (x % 3 === 0) {
-            data[base + 1] *= 0.8
-            data[base + 2] *= 0.8
-          } else if (x % 3 === 1) {
-            data[base] *= 0.8
-            data[base + 2] *= 0.8
+        break
+      case 'thermal':
+        for (let index = 0; index < data.length; index += 4) {
+          const normalized = luminance(data[index], data[index + 1], data[index + 2]) / 255
+          if (normalized < 0.25) {
+            data[index] = 0
+            data[index + 1] = 0
+            data[index + 2] = Math.floor(normalized * 4 * 255)
+          } else if (normalized < 0.5) {
+            data[index] = Math.floor((normalized - 0.25) * 4 * 255)
+            data[index + 1] = 0
+            data[index + 2] = 255
+          } else if (normalized < 0.75) {
+            data[index] = 255
+            data[index + 1] = Math.floor((normalized - 0.5) * 4 * 255)
+            data[index + 2] = Math.floor((0.75 - normalized) * 4 * 255)
           } else {
-            data[base] *= 0.8
-            data[base + 1] *= 0.8
+            data[index] = 255
+            data[index + 1] = 255
+            data[index + 2] = Math.floor((normalized - 0.75) * 4 * 255)
           }
         }
-      }
-      break
-    case 'edge': {
-      const copy = new Uint8ClampedArray(data)
-      const sample = (x, y) => {
-        const base = (y * regionWidth + x) * 4
-        return luminance(copy[base], copy[base + 1], copy[base + 2])
-      }
-      for (let y = 1; y < regionHeight - 1; y += 1) {
-        for (let x = 1; x < regionWidth - 1; x += 1) {
-          const gradientX =
-            -sample(x - 1, y - 1) -
-            2 * sample(x - 1, y) -
-            sample(x - 1, y + 1) +
-            sample(x + 1, y - 1) +
-            2 * sample(x + 1, y) +
-            sample(x + 1, y + 1)
-          const gradientY =
-            -sample(x - 1, y - 1) -
-            2 * sample(x, y - 1) -
-            sample(x + 1, y - 1) +
-            sample(x - 1, y + 1) +
-            2 * sample(x, y + 1) +
-            sample(x + 1, y + 1)
-          const value = clamp(Math.sqrt(gradientX * gradientX + gradientY * gradientY), 0, 255)
-          const base = (y * regionWidth + x) * 4
-          data[base] = value
-          data[base + 1] = value
-          data[base + 2] = value
+        break
+      case 'pixel':
+        for (let y = 0; y < regionHeight; y += 8) {
+          for (let x = 0; x < regionWidth; x += 8) {
+            let totalR = 0
+            let totalG = 0
+            let totalB = 0
+            let count = 0
+            for (let offsetY = 0; offsetY < 8 && y + offsetY < regionHeight; offsetY += 1) {
+              for (let offsetX = 0; offsetX < 8 && x + offsetX < regionWidth; offsetX += 1) {
+                const base = ((y + offsetY) * regionWidth + (x + offsetX)) * 4
+                totalR += data[base]
+                totalG += data[base + 1]
+                totalB += data[base + 2]
+                count += 1
+              }
+            }
+            const avgR = Math.floor(totalR / count)
+            const avgG = Math.floor(totalG / count)
+            const avgB = Math.floor(totalB / count)
+            for (let offsetY = 0; offsetY < 8 && y + offsetY < regionHeight; offsetY += 1) {
+              for (let offsetX = 0; offsetX < 8 && x + offsetX < regionWidth; offsetX += 1) {
+                const base = ((y + offsetY) * regionWidth + (x + offsetX)) * 4
+                data[base] = avgR
+                data[base + 1] = avgG
+                data[base + 2] = avgB
+              }
+            }
+          }
         }
+        break
+      case 'tone':
+        for (let index = 0; index < data.length; index += 4) {
+          const value = Math.floor(luminance(data[index], data[index + 1], data[index + 2]) / 64) * 64
+          data[index] = value
+          data[index + 1] = value
+          data[index + 2] = value
+        }
+        break
+      case 'blur': {
+        const copy = new Uint8ClampedArray(data)
+        for (let y = 3; y < regionHeight - 3; y += 1) {
+          for (let x = 3; x < regionWidth - 3; x += 1) {
+            let totalR = 0
+            let totalG = 0
+            let totalB = 0
+            let samples = 0
+            for (let offsetY = -3; offsetY <= 3; offsetY += 1) {
+              for (let offsetX = -3; offsetX <= 3; offsetX += 1) {
+                const base = ((y + offsetY) * regionWidth + (x + offsetX)) * 4
+                totalR += copy[base]
+                totalG += copy[base + 1]
+                totalB += copy[base + 2]
+                samples += 1
+              }
+            }
+            const base = (y * regionWidth + x) * 4
+            data[base] = totalR / samples
+            data[base + 1] = totalG / samples
+            data[base + 2] = totalB / samples
+          }
+        }
+        break
       }
-      break
+      case 'dither':
+        for (let y = 0; y < regionHeight; y += 1) {
+          for (let x = 0; x < regionWidth; x += 1) {
+            const base = (y * regionWidth + x) * 4
+            const threshold = (BAYER_4X4[y % 4][x % 4] / 16) * 255
+            const value = luminance(data[base], data[base + 1], data[base + 2]) > threshold ? 255 : 0
+            data[base] = value
+            data[base + 1] = value
+            data[base + 2] = value
+          }
+        }
+        break
+      case 'zoom': {
+        const copy = new Uint8ClampedArray(data)
+        const centerX = regionWidth / 2
+        const centerY = regionHeight / 2
+        const maxDistance = Math.sqrt(centerX * centerX + centerY * centerY)
+        for (let y = 0; y < regionHeight; y += 1) {
+          for (let x = 0; x < regionWidth; x += 1) {
+            const offsetX = x - centerX
+            const offsetY = y - centerY
+            const distance = Math.sqrt(offsetX * offsetX + offsetY * offsetY)
+            const zoom = 1 + (distance / maxDistance) * 0.3
+            const sampleX = clamp(Math.round(centerX + offsetX / zoom), 0, regionWidth - 1)
+            const sampleY = clamp(Math.round(centerY + offsetY / zoom), 0, regionHeight - 1)
+            const sample = (sampleY * regionWidth + sampleX) * 4
+            const target = (y * regionWidth + x) * 4
+            data[target] = copy[sample]
+            data[target + 1] = copy[sample + 1]
+            data[target + 2] = copy[sample + 2]
+          }
+        }
+        break
+      }
+      case 'xray':
+        for (let index = 0; index < data.length; index += 4) {
+          const inverse = 255 - luminance(data[index], data[index + 1], data[index + 2])
+          data[index] = Math.floor(inverse * 0.7)
+          data[index + 1] = Math.floor(inverse * 0.85)
+          data[index + 2] = inverse
+        }
+        break
+      case 'water': {
+        const copy = new Uint8ClampedArray(data)
+        for (let y = 0; y < regionHeight; y += 1) {
+          for (let x = 0; x < regionWidth; x += 1) {
+            const waveX = Math.round(Math.sin(y * 0.15) * 5)
+            const waveY = Math.round(Math.cos(x * 0.15) * 5)
+            const sampleX = clamp(x + waveX, 0, regionWidth - 1)
+            const sampleY = clamp(y + waveY, 0, regionHeight - 1)
+            const sample = (sampleY * regionWidth + sampleX) * 4
+            const target = (y * regionWidth + x) * 4
+            data[target] = copy[sample]
+            data[target + 1] = copy[sample + 1]
+            data[target + 2] = copy[sample + 2]
+          }
+        }
+        break
+      }
+      case 'mask': {
+        const centerX = regionWidth / 2
+        const centerY = regionHeight / 2
+        const radius = Math.min(centerX, centerY)
+        for (let y = 0; y < regionHeight; y += 1) {
+          for (let x = 0; x < regionWidth; x += 1) {
+            const distance = Math.sqrt((x - centerX) ** 2 + (y - centerY) ** 2)
+            if (distance > radius * 0.8) {
+              const fade = clamp((distance - radius * 0.8) / (radius * 0.2), 0, 1)
+              const base = (y * regionWidth + x) * 4
+              data[base] *= 1 - fade
+              data[base + 1] *= 1 - fade
+              data[base + 2] *= 1 - fade
+            }
+          }
+        }
+        break
+      }
+      case 'crt':
+        for (let y = 0; y < regionHeight; y += 1) {
+          for (let x = 0; x < regionWidth; x += 1) {
+            const base = (y * regionWidth + x) * 4
+            if (y % 3 === 0) {
+              data[base] *= 0.7
+              data[base + 1] *= 0.7
+              data[base + 2] *= 0.7
+            }
+            if (x % 3 === 0) {
+              data[base + 1] *= 0.8
+              data[base + 2] *= 0.8
+            } else if (x % 3 === 1) {
+              data[base] *= 0.8
+              data[base + 2] *= 0.8
+            } else {
+              data[base] *= 0.8
+              data[base + 1] *= 0.8
+            }
+          }
+        }
+        break
+      case 'edge': {
+        const copy = new Uint8ClampedArray(data)
+        const sample = (x, y) => {
+          const base = (y * regionWidth + x) * 4
+          return luminance(copy[base], copy[base + 1], copy[base + 2])
+        }
+        for (let y = 1; y < regionHeight - 1; y += 1) {
+          for (let x = 1; x < regionWidth - 1; x += 1) {
+            const gradientX =
+              -sample(x - 1, y - 1) -
+              2 * sample(x - 1, y) -
+              sample(x - 1, y + 1) +
+              sample(x + 1, y - 1) +
+              2 * sample(x + 1, y) +
+              sample(x + 1, y + 1)
+            const gradientY =
+              -sample(x - 1, y - 1) -
+              2 * sample(x, y - 1) -
+              sample(x + 1, y - 1) +
+              sample(x - 1, y + 1) +
+              2 * sample(x, y + 1) +
+              sample(x + 1, y + 1)
+            const value = clamp(Math.sqrt(gradientX * gradientX + gradientY * gradientY), 0, 255)
+            const base = (y * regionWidth + x) * 4
+            data[base] = value
+            data[base + 1] = value
+            data[base + 2] = value
+          }
+        }
+        break
+      }
+      default:
+        break
     }
-    default:
-      break
+  }
+
+  if (region.filter !== 'none' && filterIntensity < 1) {
+    for (let index = 0; index < data.length; index += 4) {
+      data[index] = clamp(original[index] + (data[index] - original[index]) * filterIntensity, 0, 255)
+      data[index + 1] = clamp(original[index + 1] + (data[index + 1] - original[index + 1]) * filterIntensity, 0, 255)
+      data[index + 2] = clamp(original[index + 2] + (data[index + 2] - original[index + 2]) * filterIntensity, 0, 255)
+    }
+  }
+
+  if (shouldInvertInside) {
+    for (let index = 0; index < data.length; index += 4) {
+      data[index] = 255 - data[index]
+      data[index + 1] = 255 - data[index + 1]
+      data[index + 2] = 255 - data[index + 2]
+    }
   }
 
   context.putImageData(imageData, startX, startY)
+}
+
+const pointInsideRegion = (region, x, y) => {
+  if (region.shape === 'circle') {
+    const radius = Math.min(region.width, region.height) / 2
+    const dx = x - (region.x + region.width / 2)
+    const dy = y - (region.y + region.height / 2)
+    return dx * dx + dy * dy <= radius * radius
+  }
+
+  if (region.shape === 'ellipse') {
+    const radiusX = Math.max(1, region.width / 2)
+    const radiusY = Math.max(1, region.height / 2)
+    const dx = (x - (region.x + radiusX)) / radiusX
+    const dy = (y - (region.y + radiusY)) / radiusY
+    return dx * dx + dy * dy <= 1
+  }
+
+  return (
+    x >= region.x
+    && x < region.x + region.width
+    && y >= region.y
+    && y < region.y + region.height
+  )
+}
+
+const invertOutsideRegions = (context, regions, width, height) => {
+  if (regions.length === 0) {
+    return
+  }
+
+  const imageData = context.getImageData(0, 0, width, height)
+  const { data } = imageData
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const isInsideAnyRegion = regions.some((region) => pointInsideRegion(region, x, y))
+      if (isInsideAnyRegion) {
+        continue
+      }
+
+      const base = (y * width + x) * 4
+      data[base] = 255 - data[base]
+      data[base + 1] = 255 - data[base + 1]
+      data[base + 2] = 255 - data[base + 2]
+    }
+  }
+
+  context.putImageData(imageData, 0, 0)
 }
 
 const drawRegionShape = (context, region, selected) => {
@@ -1121,6 +1195,12 @@ export const renderEffect = ({
       for (const region of regions) {
         applyRegionFilter(context, region, width, height)
       }
+      invertOutsideRegions(
+        context,
+        regions.filter((region) => region.invertRegion && (region.invertScope ?? 'inside') === 'outside'),
+        width,
+        height,
+      )
       drawConnections(context, regions, connectionStyle, connectionRate)
       for (const region of regions) {
         drawRegionShape(context, region, region.id === selectedRegionId)

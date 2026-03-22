@@ -296,6 +296,17 @@
   font-size: 0.92rem;
 }
 
+.info-text {
+  margin: 0.85rem 0 0;
+  color: rgba(255, 255, 255, 0.54);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.info-text.is-error {
+  color: #ffaaaa;
+}
+
 .region-list {
   display: grid;
   gap: 0.5rem;
@@ -319,6 +330,10 @@
 .region-row.is-active {
   background: rgba(0, 255, 136, 0.14);
   color: #d4ffe8;
+}
+
+.region-row-static {
+  cursor: default;
 }
 
 .region-actions {
