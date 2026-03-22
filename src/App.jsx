@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 import {
   DEFAULT_SETTINGS,
@@ -8,6 +8,7 @@ import {
   REGION_STYLES,
 } from './config'
 import { drawDraftRegion, getRegionStyleLabel, makeRegionLabel, renderEffect } from './effects'
+import { createModelViewer } from './modelScene'
 
 const PANEL_COLOR_EFFECTS = new Set(['half-tone', 'retroman'])
 
@@ -19,6 +20,22 @@ const buildInitialTrackState = () => ({
   filter: EMPTY_REGION_STYLE.filter,
   connectionStyle: EMPTY_REGION_STYLE.connectionStyle,
   connectionRate: EMPTY_REGION_STYLE.connectionRate,
+})
+
+const buildInitialModelConfig = () => ({
+  scale: 1,
+  rotationX: 0,
+  rotationY: 0,
+  rotationZ: 0,
+  positionX: 0,
+  positionY: 0,
+  positionZ: 0,
+  lightIntensity: 2.8,
+  ambientIntensity: 1.2,
+  exposure: 1,
+  autoRotate: false,
+  wireframe: false,
+  background: '#0d0d10',
 })
 
 const readFileAsUrl = (file) =>
@@ -98,16 +115,232 @@ function App() {
   const [effectId, setEffectId] = useState('color-htone')
   const [settings, setSettings] = useState(cloneDefaults)
   const [trackState, setTrackState] = useState(buildInitialTrackState)
+  const [modelConfig, setModelConfig] = useState(buildInitialModelConfig)
   const [regions, setRegions] = useState([])
   const [selectedRegionId, setSelectedRegionId] = useState(null)
   const [draftRegion, setDraftRegion] = useState(null)
   const [drawing, setDrawing] = useState(null)
+  const [sourceKind, setSourceKind] = useState(null)
   const [sourceUrl, setSourceUrl] = useState('')
   const [image, setImage] = useState(null)
+  const [modelName, setModelName] = useState('')
   const [error, setError] = useState('')
   const [fitMode, setFitMode] = useState('contain')
 
   const canvasRef = useRef(null)
+  const previewFrameRef = useRef(null)
+  const modelViewerRef = useRef(null)
+  const effectCanvasRef = useRef(null)
+  const renderStateRef = useRef({
+    draftRegion: null,
+    effectId,
+    image: null,
+    modelConfig,
+    regions: [],
+    selectedRegionId: null,
+    settings,
+    sourceKind: null,
+    trackState,
+  })
+  const renderMetricsRef = useRef({
+    sourceWidth: 0,
+    sourceHeight: 0,
+    displayWidth: 0,
+    displayHeight: 0,
+  })
+  const lowQualityUntilRef = useRef(0)
+  const lastModelFrameRef = useRef(0)
+  const renderRequestedRef = useRef(true)
+  const rafIdRef = useRef(0)
+  const requestRenderRef = useRef(() => {})
+  const invalidateModelPreviewRef = useRef(() => {})
+
+  const syncRenderState = useCallback((patch) => {
+    renderStateRef.current = {
+      ...renderStateRef.current,
+      ...patch,
+    }
+  }, [])
+
+  const requestRender = (interactive = false) => {
+    requestRenderRef.current(interactive)
+  }
+
+  const invalidateModelPreview = () => {
+    invalidateModelPreviewRef.current()
+  }
+
+  useEffect(() => {
+    let viewer
+    try {
+      viewer = createModelViewer()
+      modelViewerRef.current = viewer
+    } catch (viewerError) {
+      queueMicrotask(() => {
+        setError(
+          viewerError instanceof Error
+            ? `3D preview unavailable: ${viewerError.message}`
+            : '3D preview unavailable on this device/browser.',
+        )
+      })
+      requestRenderRef.current = () => {}
+      invalidateModelPreviewRef.current = () => {}
+      return undefined
+    }
+
+    effectCanvasRef.current = document.createElement('canvas')
+    const nudgeInteractiveQualityWindow = () => {
+      lowQualityUntilRef.current = performance.now() + 220
+    }
+    const ensureRenderLoop = () => {
+      if (rafIdRef.current !== 0) {
+        return
+      }
+      rafIdRef.current = requestAnimationFrame((time) => {
+        rafIdRef.current = 0
+
+        const canvas = canvasRef.current
+        const previewFrame = previewFrameRef.current
+        const effectCanvas = effectCanvasRef.current
+        if (!canvas || !previewFrame) {
+          return
+        }
+
+        const displayContext = canvas.getContext('2d', { willReadFrequently: true })
+        const effectContext = effectCanvas?.getContext('2d', { willReadFrequently: true })
+        const state = renderStateRef.current
+        const shouldAnimate =
+          (state.sourceKind === 'model' && (state.modelConfig.autoRotate || viewer.isDragging() || time < lowQualityUntilRef.current)) ||
+          (state.effectId === 'ascii-kit' && state.settings['ascii-kit'].animated)
+
+        if (state.sourceKind === 'model' && shouldAnimate && !renderRequestedRef.current) {
+          const targetFps = state.modelConfig.autoRotate ? 12 : viewer.isDragging() ? 20 : 40
+          const frameInterval = 1000 / targetFps
+          if (time - lastModelFrameRef.current < frameInterval) {
+            ensureRenderLoop()
+            return
+          }
+        }
+
+        renderRequestedRef.current = false
+
+        let source = null
+        let sourceWidth = 0
+        let sourceHeight = 0
+        let displayWidth = 0
+        let displayHeight = 0
+
+        if (state.sourceKind === 'model') {
+          const bounds = previewFrame.getBoundingClientRect()
+          const interacting = state.modelConfig.autoRotate || viewer.isDragging() || time < lowQualityUntilRef.current
+          const qualityScale = interacting ? 0.45 : 0.9
+
+          displayWidth = Math.max(1, Math.round(bounds.width))
+          displayHeight = Math.max(1, Math.round(bounds.height))
+          sourceWidth = Math.min(1280, Math.max(560, Math.round(displayWidth * qualityScale)))
+          sourceHeight = Math.min(960, Math.max(420, Math.round(displayHeight * qualityScale)))
+          viewer.setViewport(sourceWidth, sourceHeight)
+          source = viewer.render(state.modelConfig)
+          lastModelFrameRef.current = time
+        } else if (state.image) {
+          sourceWidth = state.image.naturalWidth || state.image.width
+          sourceHeight = state.image.naturalHeight || state.image.height
+          source = state.image
+        }
+
+        if (source && sourceWidth > 0 && sourceHeight > 0) {
+          if (state.sourceKind === 'model') {
+            if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
+              canvas.width = displayWidth
+              canvas.height = displayHeight
+            }
+            if (effectCanvas && (effectCanvas.width !== sourceWidth || effectCanvas.height !== sourceHeight)) {
+              effectCanvas.width = sourceWidth
+              effectCanvas.height = sourceHeight
+            }
+          } else if (canvas.width !== sourceWidth || canvas.height !== sourceHeight) {
+            canvas.width = sourceWidth
+            canvas.height = sourceHeight
+          }
+
+          renderMetricsRef.current = {
+            sourceWidth,
+            sourceHeight,
+            displayWidth: state.sourceKind === 'model' ? displayWidth : sourceWidth,
+            displayHeight: state.sourceKind === 'model' ? displayHeight : sourceHeight,
+          }
+
+          renderEffect({
+            context: state.sourceKind === 'model' ? effectContext : displayContext,
+            image: source,
+            effectId: state.effectId,
+            settings: state.settings[state.effectId],
+            width: sourceWidth,
+            height: sourceHeight,
+            regions: state.regions,
+            selectedRegionId: state.selectedRegionId,
+            connectionStyle: state.trackState.connectionStyle,
+            connectionRate: state.trackState.connectionRate,
+            now: time / 1000,
+          })
+
+          if (state.effectId === 'img-track' && state.draftRegion) {
+            drawDraftRegion(state.sourceKind === 'model' ? effectContext : displayContext, state.draftRegion)
+          }
+
+          if (state.sourceKind === 'model') {
+            displayContext.clearRect(0, 0, displayWidth, displayHeight)
+            displayContext.drawImage(effectCanvas, 0, 0, displayWidth, displayHeight)
+          }
+        } else {
+          displayContext.clearRect(0, 0, canvas.width, canvas.height)
+        }
+
+        if (
+          renderRequestedRef.current ||
+          (state.sourceKind === 'model' && (state.modelConfig.autoRotate || viewer.isDragging() || time < lowQualityUntilRef.current)) ||
+          (state.effectId === 'ascii-kit' && state.settings['ascii-kit'].animated)
+        ) {
+          ensureRenderLoop()
+        }
+      })
+    }
+
+    requestRenderRef.current = (interactive = false) => {
+      if (interactive) {
+        nudgeInteractiveQualityWindow()
+      }
+      renderRequestedRef.current = true
+      ensureRenderLoop()
+    }
+
+    invalidateModelPreviewRef.current = () => {
+      lastModelFrameRef.current = Number.NEGATIVE_INFINITY
+      requestRenderRef.current(true)
+    }
+
+    const resizeObserver = new ResizeObserver(() => {
+      requestRenderRef.current()
+    })
+
+    if (previewFrameRef.current) {
+      resizeObserver.observe(previewFrameRef.current)
+    }
+
+    requestRenderRef.current()
+
+    return () => {
+      resizeObserver.disconnect()
+      requestRenderRef.current = () => {}
+      invalidateModelPreviewRef.current = () => {}
+      modelViewerRef.current = null
+      if (rafIdRef.current) {
+        cancelAnimationFrame(rafIdRef.current)
+        rafIdRef.current = 0
+      }
+      viewer.dispose()
+    }
+  }, [])
 
   useEffect(() => {
     if (!sourceUrl) {
@@ -115,98 +348,165 @@ function App() {
     }
 
     const nextImage = new Image()
-    nextImage.onload = () => setImage(nextImage)
+    nextImage.onload = () => {
+      syncRenderState({ image: nextImage })
+      setImage(nextImage)
+      requestRenderRef.current()
+    }
     nextImage.onerror = () => setError('Unable to load that image.')
     nextImage.src = sourceUrl
     return () => {
       nextImage.onload = null
       nextImage.onerror = null
     }
-  }, [sourceUrl])
+  }, [sourceUrl, syncRenderState])
 
   useEffect(() => {
-    if (!image || !canvasRef.current) {
-      return
-    }
-
-    const canvas = canvasRef.current
-    canvas.width = image.naturalWidth || image.width
-    canvas.height = image.naturalHeight || image.height
-    const context = canvas.getContext('2d', { willReadFrequently: true })
-
-    let frame = 0
-    const paint = (time) => {
-      renderEffect({
-        context,
-        image,
-        effectId,
-        settings: settings[effectId],
-        width: canvas.width,
-        height: canvas.height,
-        regions,
-        selectedRegionId,
-        connectionStyle: trackState.connectionStyle,
-        connectionRate: trackState.connectionRate,
-        now: time / 1000,
-      })
-      if (effectId === 'img-track' && draftRegion) {
-        drawDraftRegion(context, draftRegion)
-      }
-      if (effectId === 'ascii-kit' && settings['ascii-kit'].animated) {
-        frame = requestAnimationFrame(paint)
-      }
-    }
-
-    paint(0)
-    if (effectId === 'ascii-kit' && settings['ascii-kit'].animated) {
-      frame = requestAnimationFrame(paint)
-    }
-
-    return () => {
-      if (frame) {
-        cancelAnimationFrame(frame)
-      }
-    }
-  }, [draftRegion, effectId, image, regions, selectedRegionId, settings, trackState])
+    syncRenderState({
+      draftRegion,
+      effectId,
+      image,
+      modelConfig,
+      regions,
+      selectedRegionId,
+      settings,
+      sourceKind,
+      trackState,
+    })
+    requestRenderRef.current(sourceKind === 'model')
+  }, [draftRegion, effectId, image, modelConfig, regions, selectedRegionId, settings, sourceKind, syncRenderState, trackState])
 
   const currentEffect = EFFECTS.find((effect) => effect.id === effectId)
   const currentSettings = settings[effectId]
   const showStandaloneColor =
     PANEL_COLOR_EFFECTS.has(effectId) || (effectId === 'ascii-kit' && currentSettings.colorMode === 'mono')
+  const hasSource = sourceKind === 'model' ? Boolean(modelName) : Boolean(image)
 
   const updateSetting = (key, value) => {
-    setSettings((current) => ({
-      ...current,
+    const nextSettings = {
+      ...settings,
       [effectId]: {
-        ...current[effectId],
+        ...settings[effectId],
         [key]: value,
       },
-    }))
+    }
+    syncRenderState({ settings: nextSettings })
+    setSettings(nextSettings)
+    if (sourceKind === 'model') {
+      invalidateModelPreview()
+    } else {
+      requestRender()
+    }
   }
 
   const updateTrackState = (key, value) => {
-    setTrackState((current) => ({
-      ...current,
+    const nextTrackState = {
+      ...trackState,
       [key]: value,
-    }))
+    }
+    syncRenderState({ trackState: nextTrackState })
+    setTrackState(nextTrackState)
+    if (sourceKind === 'model') {
+      invalidateModelPreview()
+    } else {
+      requestRender()
+    }
   }
 
-  const handleUpload = async (event) => {
+  const updateModelConfig = (key, value) => {
+    const nextModelConfig = {
+      ...modelConfig,
+      [key]: value,
+    }
+    syncRenderState({ modelConfig: nextModelConfig })
+    setModelConfig(nextModelConfig)
+    invalidateModelPreview()
+  }
+
+  const resetModelConfig = () => {
+    const nextModelConfig = buildInitialModelConfig()
+    syncRenderState({ modelConfig: nextModelConfig })
+    setModelConfig(nextModelConfig)
+    invalidateModelPreview()
+  }
+
+  const selectEffect = (nextEffectId) => {
+    syncRenderState({ effectId: nextEffectId })
+    setEffectId(nextEffectId)
+    if (sourceKind === 'model') {
+      invalidateModelPreview()
+    } else {
+      requestRender()
+    }
+  }
+
+  const updateDraftRegion = (nextDraftRegion) => {
+    syncRenderState({ draftRegion: nextDraftRegion })
+    setDraftRegion(nextDraftRegion)
+    requestRender(sourceKind === 'model')
+  }
+
+  const updateRegions = (nextRegions, nextSelectedRegionId = selectedRegionId) => {
+    syncRenderState({
+      regions: nextRegions,
+      selectedRegionId: nextSelectedRegionId,
+    })
+    setRegions(nextRegions)
+    setSelectedRegionId(nextSelectedRegionId)
+    requestRender(sourceKind === 'model')
+  }
+
+  const selectRegion = (nextRegionId) => {
+    syncRenderState({ selectedRegionId: nextRegionId })
+    setSelectedRegionId(nextRegionId)
+    requestRender(sourceKind === 'model')
+  }
+
+  const handleImageUpload = async (event) => {
     const file = event.target.files?.[0]
     event.target.value = ''
     if (!file) {
       return
     }
-
     if (!file.type.startsWith('image/')) {
-      setError('This build currently supports image files only.')
+      setError('Use an image for image mode.')
       return
     }
 
     setError('')
+    syncRenderState({ image: null, sourceKind: 'image' })
+    setSourceKind('image')
     setImage(null)
+    setModelName('')
     const nextUrl = await readFileAsUrl(file)
     setSourceUrl(nextUrl)
+  }
+
+  const handleModelUpload = async (event) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) {
+      return
+    }
+    if (!modelViewerRef.current) {
+      setError('3D preview unavailable on this device/browser.')
+      return
+    }
+
+    setError('')
+    invalidateModelPreview()
+    try {
+      await modelViewerRef.current.loadModel(file, modelConfig)
+      syncRenderState({ image: null, sourceKind: 'model' })
+      setSourceKind('model')
+      setModelName(file.name)
+      setImage(null)
+      setSourceUrl('')
+      setFitMode('contain')
+      invalidateModelPreview()
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : 'Unable to load that 3D file.')
+    }
   }
 
   const exportPng = () => {
@@ -222,8 +522,9 @@ function App() {
   const pointerToCanvasPoint = (event) => {
     const canvas = canvasRef.current
     const bounds = canvas.getBoundingClientRect()
-    const scaleX = canvas.width / bounds.width
-    const scaleY = canvas.height / bounds.height
+    const metrics = renderMetricsRef.current
+    const scaleX = (metrics.sourceWidth || canvas.width) / bounds.width
+    const scaleY = (metrics.sourceHeight || canvas.height) / bounds.height
     return {
       x: (event.clientX - bounds.left) * scaleX,
       y: (event.clientY - bounds.top) * scaleY,
@@ -231,84 +532,103 @@ function App() {
   }
 
   const handlePointerDown = (event) => {
-    if (effectId !== 'img-track' || !image) {
-      return
-    }
-    event.preventDefault()
-    const point = pointerToCanvasPoint(event)
-    setDrawing(point)
-    setDraftRegion({
-      id: 'draft',
-      x: point.x,
-      y: point.y,
-      width: 0,
-      height: 0,
-      shape: trackState.shape,
-      style: trackState.style,
-      filter: trackState.filter,
-      label: 'Draft',
-    })
-  }
-
-  const handlePointerMove = (event) => {
-    if (!drawing || effectId !== 'img-track') {
-      return
-    }
-    event.preventDefault()
-    const point = pointerToCanvasPoint(event)
-    const x = Math.min(point.x, drawing.x)
-    const y = Math.min(point.y, drawing.y)
-    const width = Math.abs(point.x - drawing.x)
-    const height = Math.abs(point.y - drawing.y)
-    setDraftRegion({
-      id: 'draft',
-      x,
-      y,
-      width,
-      height,
-      shape: trackState.shape,
-      style: trackState.style,
-      filter: trackState.filter,
-      label: 'Draft',
-    })
-  }
-
-  const handlePointerUp = () => {
-    if (!drawing || !draftRegion) {
+    if (!hasSource) {
       return
     }
 
-    if (draftRegion.width > 12 && draftRegion.height > 12) {
-      const nextRegion = {
-        id: crypto.randomUUID(),
-        x: draftRegion.x,
-        y: draftRegion.y,
-        width: draftRegion.width,
-        height: draftRegion.height,
+    if (effectId === 'img-track') {
+      event.preventDefault()
+      const point = pointerToCanvasPoint(event)
+      const nextDraftRegion = {
+        id: 'draft',
+        x: point.x,
+        y: point.y,
+        width: 0,
+        height: 0,
         shape: trackState.shape,
         style: trackState.style,
         filter: trackState.filter,
-        label: makeRegionLabel(regions.length),
+        label: 'Draft',
       }
-      setRegions((current) => [...current, nextRegion])
-      setSelectedRegionId(nextRegion.id)
+      setDrawing(point)
+      updateDraftRegion(nextDraftRegion)
+      return
     }
 
-    setDrawing(null)
-    setDraftRegion(null)
+    if (sourceKind === 'model') {
+      invalidateModelPreview()
+      modelViewerRef.current?.onPointerDown(event)
+    }
+  }
+
+  const handlePointerMove = (event) => {
+    if (drawing && effectId === 'img-track') {
+      event.preventDefault()
+      const point = pointerToCanvasPoint(event)
+      const x = Math.min(point.x, drawing.x)
+      const y = Math.min(point.y, drawing.y)
+      const width = Math.abs(point.x - drawing.x)
+      const height = Math.abs(point.y - drawing.y)
+      updateDraftRegion({
+        id: 'draft',
+        x,
+        y,
+        width,
+        height,
+        shape: trackState.shape,
+        style: trackState.style,
+        filter: trackState.filter,
+        label: 'Draft',
+      })
+      return
+    }
+
+    if (sourceKind === 'model') {
+      invalidateModelPreview()
+      modelViewerRef.current?.onPointerMove(event)
+    }
+  }
+
+  const handlePointerUp = () => {
+    if (drawing && draftRegion) {
+      if (draftRegion.width > 12 && draftRegion.height > 12) {
+        const nextRegion = {
+          id: crypto.randomUUID(),
+          x: draftRegion.x,
+          y: draftRegion.y,
+          width: draftRegion.width,
+          height: draftRegion.height,
+          shape: trackState.shape,
+          style: trackState.style,
+          filter: trackState.filter,
+          label: makeRegionLabel(regions.length),
+        }
+        updateRegions([...regions, nextRegion], nextRegion.id)
+      }
+      syncRenderState({ draftRegion: null })
+      setDrawing(null)
+      setDraftRegion(null)
+      requestRender(sourceKind === 'model')
+    }
+
+    modelViewerRef.current?.onPointerUp()
+    if (sourceKind === 'model') {
+      invalidateModelPreview()
+    }
   }
 
   const removeSelectedRegion = () => {
     if (!selectedRegionId) {
       return
     }
-    setRegions((current) => current.filter((region) => region.id !== selectedRegionId))
-    setSelectedRegionId(null)
+    updateRegions(
+      regions.filter((region) => region.id !== selectedRegionId),
+      null,
+    )
   }
 
   const clearRegions = () => {
-    setRegions([])
-    setSelectedRegionId(null)
+    updateRegions([], null)
   }
 
   return (
@@ -317,7 +637,7 @@ function App() {
         <div className="sidebar-block top-bar">
           <div>
             <p className="eyebrow">Stylizer Lab</p>
-            <h1>Image Effects Editor</h1>
+            <h1>Image + 3D Effects Editor</h1>
             <p className="lede">{currentEffect?.description}</p>
           </div>
           <button className="button button-ghost" onClick={exportPng} type="button">
@@ -327,12 +647,47 @@ function App() {
 
         <div className="sidebar-block">
           <SectionTitle>Source</SectionTitle>
-          <label className="upload-card">
-            <span>Upload image</span>
-            <input accept="image/*" onChange={handleUpload} type="file" />
-          </label>
+          <div className="source-grid">
+            <label className="upload-card">
+              <span>Upload image</span>
+              <input accept="image/*" onChange={handleImageUpload} type="file" />
+            </label>
+            <label className="upload-card">
+              <span>Upload 3D</span>
+              <input accept=".obj,.gltf,.glb,model/gltf-binary,model/gltf+json" onChange={handleModelUpload} type="file" />
+            </label>
+          </div>
+          <p className="source-caption">
+            {sourceKind === 'model'
+              ? `3D source: ${modelName}`
+              : sourceKind === 'image'
+                ? 'Image source loaded'
+                : 'Supports PNG, JPG, OBJ, GLTF, and GLB.'}
+          </p>
           {error ? <p className="error-text">{error}</p> : null}
         </div>
+
+        {sourceKind === 'model' ? (
+          <div className="sidebar-block">
+            <SectionTitle>3D Controls</SectionTitle>
+            <SliderControl label="Scale" max={3} min={0.2} onChange={(value) => updateModelConfig('scale', value)} step={0.05} value={modelConfig.scale} />
+            <SliderControl label="Rotate X" max={180} min={-180} onChange={(value) => updateModelConfig('rotationX', value)} value={modelConfig.rotationX} />
+            <SliderControl label="Rotate Y" max={180} min={-180} onChange={(value) => updateModelConfig('rotationY', value)} value={modelConfig.rotationY} />
+            <SliderControl label="Rotate Z" max={180} min={-180} onChange={(value) => updateModelConfig('rotationZ', value)} value={modelConfig.rotationZ} />
+            <SliderControl label="Position X" max={3} min={-3} onChange={(value) => updateModelConfig('positionX', value)} step={0.05} value={modelConfig.positionX} />
+            <SliderControl label="Position Y" max={3} min={-3} onChange={(value) => updateModelConfig('positionY', value)} step={0.05} value={modelConfig.positionY} />
+            <SliderControl label="Position Z" max={3} min={-3} onChange={(value) => updateModelConfig('positionZ', value)} step={0.05} value={modelConfig.positionZ} />
+            <SliderControl label="Key Light" max={6} min={0} onChange={(value) => updateModelConfig('lightIntensity', value)} step={0.1} value={modelConfig.lightIntensity} />
+            <SliderControl label="Ambient" max={4} min={0} onChange={(value) => updateModelConfig('ambientIntensity', value)} step={0.1} value={modelConfig.ambientIntensity} />
+            <SliderControl label="Exposure" max={2.5} min={0.2} onChange={(value) => updateModelConfig('exposure', value)} step={0.05} value={modelConfig.exposure} />
+            <ColorControl label="Background" onChange={(value) => updateModelConfig('background', value)} value={modelConfig.background} />
+            <ToggleControl checked={modelConfig.autoRotate} label="Auto Rotate" onChange={(value) => updateModelConfig('autoRotate', value)} />
+            <ToggleControl checked={modelConfig.wireframe} label="Wireframe" onChange={(value) => updateModelConfig('wireframe', value)} />
+            <button className="button button-muted full-width" onClick={resetModelConfig} type="button">
+              Reset 3D Controls
+            </button>
+          </div>
+        ) : null}
 
         <div className="sidebar-block">
           <SectionTitle>Effect</SectionTitle>
@@ -341,7 +696,7 @@ function App() {
               <button
                 key={effect.id}
                 className={`effect-button ${effect.id === effectId ? 'is-active' : ''}`}
-                onClick={() => setEffectId(effect.id)}
+                onClick={() => selectEffect(effect.id)}
                 type="button"
               >
                 {effect.label}
@@ -391,11 +746,7 @@ function App() {
                 </>
               ) : null}
               {currentSettings.mode !== 'tb' && currentSettings.mode !== 'lr' ? (
-                <ToggleControl
-                  checked={currentSettings.gradientMask}
-                  label="Gradient Mask"
-                  onChange={(value) => updateSetting('gradientMask', value)}
-                />
+                <ToggleControl checked={currentSettings.gradientMask} label="Gradient Mask" onChange={(value) => updateSetting('gradientMask', value)} />
               ) : null}
               {currentSettings.gradientMask && currentSettings.mode !== 'tb' && currentSettings.mode !== 'lr' ? (
                 <>
@@ -424,28 +775,13 @@ function App() {
           {effectId === 'color-htone' ? (
             <>
               <SectionTitle>Mode</SectionTitle>
-              <SegmentedControl
-                onChange={(value) => updateSetting('colorMode', value)}
-                options={[
-                  { label: 'CMYK', value: 'cmyk' },
-                  { label: 'RGB', value: 'rgb' },
-                ]}
-                value={currentSettings.colorMode}
-              />
+              <SegmentedControl onChange={(value) => updateSetting('colorMode', value)} options={[{ label: 'CMYK', value: 'cmyk' }, { label: 'RGB', value: 'rgb' }]} value={currentSettings.colorMode} />
               <SliderControl label="Dot Size" max={24} min={2} onChange={(value) => updateSetting('dotSize', value)} value={currentSettings.dotSize} />
               <SliderControl label="Mix" max={100} min={0} onChange={(value) => updateSetting('mix', value)} value={currentSettings.mix} />
               <SliderControl label="Brightness" max={100} min={-100} onChange={(value) => updateSetting('brightness', value)} value={currentSettings.brightness} />
               <SliderControl label="Contrast" max={100} min={-100} onChange={(value) => updateSetting('contrast', value)} value={currentSettings.contrast} />
               <SectionTitle>Background</SectionTitle>
-              <SegmentedControl
-                onChange={(value) => updateSetting('background', value)}
-                options={[
-                  { label: 'White', value: '#ffffff' },
-                  { label: 'Black', value: '#000000' },
-                  { label: 'Paper', value: '#f5f0e8' },
-                ]}
-                value={currentSettings.background}
-              />
+              <SegmentedControl onChange={(value) => updateSetting('background', value)} options={[{ label: 'White', value: '#ffffff' }, { label: 'Black', value: '#000000' }, { label: 'Paper', value: '#f5f0e8' }]} value={currentSettings.background} />
             </>
           ) : null}
 
@@ -464,58 +800,19 @@ function App() {
           {effectId === 'ascii-kit' ? (
             <>
               <SectionTitle>Render Mode</SectionTitle>
-              <SegmentedControl
-                onChange={(value) => updateSetting('renderMode', value)}
-                options={[
-                  { label: 'Brightness', value: 'brightness' },
-                  { label: 'Edges', value: 'edges' },
-                ]}
-                value={currentSettings.renderMode}
-              />
+              <SegmentedControl onChange={(value) => updateSetting('renderMode', value)} options={[{ label: 'Brightness', value: 'brightness' }, { label: 'Edges', value: 'edges' }]} value={currentSettings.renderMode} />
               <SectionTitle>Character Set</SectionTitle>
-              <SegmentedControl
-                onChange={(value) => updateSetting('charset', value)}
-                options={[
-                  { label: 'Dense', value: 'dense' },
-                  { label: 'Classic', value: 'classic' },
-                  { label: 'Blocks', value: 'blocks' },
-                  { label: 'Binary', value: 'binary' },
-                  { label: 'Minimal', value: 'minimal' },
-                  { label: 'Retro', value: 'retro' },
-                ]}
-                value={currentSettings.charset}
-              />
+              <SegmentedControl onChange={(value) => updateSetting('charset', value)} options={[{ label: 'Dense', value: 'dense' }, { label: 'Classic', value: 'classic' }, { label: 'Blocks', value: 'blocks' }, { label: 'Binary', value: 'binary' }, { label: 'Minimal', value: 'minimal' }, { label: 'Retro', value: 'retro' }]} value={currentSettings.charset} />
               <SliderControl label="Font Size" max={28} min={6} onChange={(value) => updateSetting('fontSize', value)} step={2} value={currentSettings.fontSize} />
               <SliderControl label="Coverage" max={100} min={10} onChange={(value) => updateSetting('coverage', value)} value={currentSettings.coverage} />
               <SliderControl label="Edge Emphasis" max={100} min={0} onChange={(value) => updateSetting('edgeEmphasis', value)} value={currentSettings.edgeEmphasis} />
               <SectionTitle>Background</SectionTitle>
-              <SegmentedControl
-                onChange={(value) => updateSetting('bgMode', value)}
-                options={[
-                  { label: 'Blurred', value: 'blurred' },
-                  { label: 'Original', value: 'original' },
-                  { label: 'Black', value: 'black' },
-                ]}
-                value={currentSettings.bgMode}
-              />
-              {currentSettings.bgMode === 'blurred' ? (
-                <SliderControl label="Blur" max={50} min={0} onChange={(value) => updateSetting('bgBlur', value)} value={currentSettings.bgBlur} />
-              ) : null}
-              {currentSettings.bgMode !== 'black' ? (
-                <SliderControl label="Opacity" max={100} min={0} onChange={(value) => updateSetting('bgOpacity', value)} value={currentSettings.bgOpacity} />
-              ) : null}
+              <SegmentedControl onChange={(value) => updateSetting('bgMode', value)} options={[{ label: 'Blurred', value: 'blurred' }, { label: 'Original', value: 'original' }, { label: 'Black', value: 'black' }]} value={currentSettings.bgMode} />
+              {currentSettings.bgMode === 'blurred' ? <SliderControl label="Blur" max={50} min={0} onChange={(value) => updateSetting('bgBlur', value)} value={currentSettings.bgBlur} /> : null}
+              {currentSettings.bgMode !== 'black' ? <SliderControl label="Opacity" max={100} min={0} onChange={(value) => updateSetting('bgOpacity', value)} value={currentSettings.bgOpacity} /> : null}
               <SectionTitle>Color & Tone</SectionTitle>
-              <SegmentedControl
-                onChange={(value) => updateSetting('colorMode', value)}
-                options={[
-                  { label: 'True Color', value: 'color' },
-                  { label: 'Custom', value: 'mono' },
-                ]}
-                value={currentSettings.colorMode}
-              />
-              {currentSettings.colorMode === 'mono' ? (
-                <ColorControl label="Color" onChange={(value) => updateSetting('color', value)} value={currentSettings.color} />
-              ) : null}
+              <SegmentedControl onChange={(value) => updateSetting('colorMode', value)} options={[{ label: 'True Color', value: 'color' }, { label: 'Custom', value: 'mono' }]} value={currentSettings.colorMode} />
+              {currentSettings.colorMode === 'mono' ? <ColorControl label="Color" onChange={(value) => updateSetting('color', value)} value={currentSettings.color} /> : null}
               <SliderControl label="Char Opacity" max={100} min={10} onChange={(value) => updateSetting('charOpacity', value)} value={currentSettings.charOpacity} />
               <SliderControl label="Brightness" max={100} min={-100} onChange={(value) => updateSetting('brightness', value)} value={currentSettings.brightness} />
               <SliderControl label="Contrast" max={100} min={-100} onChange={(value) => updateSetting('contrast', value)} value={currentSettings.contrast} />
@@ -535,17 +832,9 @@ function App() {
             </>
           ) : null}
 
-          {effectId === 'image-track' ? (
-            <SliderControl label="Strength" max={100} min={0} onChange={(value) => updateSetting('strength', value)} value={currentSettings.strength} />
-          ) : null}
-
-          {effectId === 'half-tone' ? (
-            <SliderControl label="Dot Size" max={20} min={2} onChange={(value) => updateSetting('dotSize', value)} value={currentSettings.dotSize} />
-          ) : null}
-
-          {effectId === 'retroman' ? (
-            <SliderControl label="Pixel Scale" max={8} min={1} onChange={(value) => updateSetting('scale', value)} value={currentSettings.scale} />
-          ) : null}
+          {effectId === 'image-track' ? <SliderControl label="Strength" max={100} min={0} onChange={(value) => updateSetting('strength', value)} value={currentSettings.strength} /> : null}
+          {effectId === 'half-tone' ? <SliderControl label="Dot Size" max={20} min={2} onChange={(value) => updateSetting('dotSize', value)} value={currentSettings.dotSize} /> : null}
+          {effectId === 'retroman' ? <SliderControl label="Pixel Scale" max={8} min={1} onChange={(value) => updateSetting('scale', value)} value={currentSettings.scale} /> : null}
 
           {effectId === 'glitch-kit' ? (
             <>
@@ -566,37 +855,13 @@ function App() {
           {effectId === 'img-track' ? (
             <>
               <SectionTitle>Shape</SectionTitle>
-              <SegmentedControl
-                onChange={(value) => updateTrackState('shape', value)}
-                options={[
-                  { label: 'Rectangle', value: 'rectangle' },
-                  { label: 'Circle', value: 'circle' },
-                  { label: 'Ellipse', value: 'ellipse' },
-                ]}
-                value={trackState.shape}
-              />
+              <SegmentedControl onChange={(value) => updateTrackState('shape', value)} options={[{ label: 'Rectangle', value: 'rectangle' }, { label: 'Circle', value: 'circle' }, { label: 'Ellipse', value: 'ellipse' }]} value={trackState.shape} />
               <SectionTitle>Region Style</SectionTitle>
-              <SegmentedControl
-                onChange={(value) => updateTrackState('style', value)}
-                options={REGION_STYLES.map((style) => ({ label: style.label, value: style.id }))}
-                value={trackState.style}
-              />
+              <SegmentedControl onChange={(value) => updateTrackState('style', value)} options={REGION_STYLES.map((style) => ({ label: style.label, value: style.id }))} value={trackState.style} />
               <SectionTitle>Filter Effects</SectionTitle>
-              <SegmentedControl
-                onChange={(value) => updateTrackState('filter', value)}
-                options={REGION_FILTERS.map((filter) => ({ label: filter.label, value: filter.id }))}
-                value={trackState.filter}
-              />
+              <SegmentedControl onChange={(value) => updateTrackState('filter', value)} options={REGION_FILTERS.map((filter) => ({ label: filter.label, value: filter.id }))} value={trackState.filter} />
               <SectionTitle>Connections</SectionTitle>
-              <SegmentedControl
-                onChange={(value) => updateTrackState('connectionStyle', value)}
-                options={[
-                  { label: 'Dashed', value: 'dashed' },
-                  { label: 'Solid', value: 'solid' },
-                  { label: 'Dotted', value: 'dotted' },
-                ]}
-                value={trackState.connectionStyle}
-              />
+              <SegmentedControl onChange={(value) => updateTrackState('connectionStyle', value)} options={[{ label: 'Dashed', value: 'dashed' }, { label: 'Solid', value: 'solid' }, { label: 'Dotted', value: 'dotted' }]} value={trackState.connectionStyle} />
               <SliderControl label="Connection Rate" max={100} min={10} onChange={(value) => updateTrackState('connectionRate', value)} value={trackState.connectionRate} />
             </>
           ) : null}
@@ -607,12 +872,7 @@ function App() {
             <SectionTitle>Regions ({regions.length})</SectionTitle>
             <div className="region-list">
               {regions.map((region) => (
-                <button
-                  key={region.id}
-                  className={`region-row ${region.id === selectedRegionId ? 'is-active' : ''}`}
-                  onClick={() => setSelectedRegionId(region.id)}
-                  type="button"
-                >
+                <button key={region.id} className={`region-row ${region.id === selectedRegionId ? 'is-active' : ''}`} onClick={() => selectRegion(region.id)} type="button">
                   <span>{region.label}</span>
                   <span>{region.shape} · {getRegionStyleLabel(region.style)}</span>
                 </button>
@@ -633,21 +893,27 @@ function App() {
       <main className="preview-shell">
         <div className="preview-toolbar">
           <div className="preview-meta">
-            <span>{image ? 'Canvas ready' : 'Waiting for source image'}</span>
-            <span>{image ? `${image.width} × ${image.height}` : 'Upload a PNG or JPG to start'}</span>
+            <span>{hasSource ? 'Canvas ready' : 'Waiting for source'}</span>
+            <span>
+              {sourceKind === 'model'
+                ? 'Drag to orbit the model.'
+                : image
+                  ? `${image.width} × ${image.height}`
+                  : 'Upload an image or a 3D model to start.'}
+            </span>
           </div>
           <button className="button button-muted" onClick={() => setFitMode((current) => (current === 'contain' ? 'cover' : 'contain'))} type="button">
             {fitMode === 'contain' ? 'Fill' : 'Fit'}
           </button>
         </div>
 
-        <div className="preview-frame">
-          {image ? null : (
+        <div className="preview-frame" ref={previewFrameRef}>
+          {!hasSource ? (
             <div className="empty-state">
-              <p>No image loaded</p>
-              <span>Use Upload image to start rendering effects.</span>
+              <p>No source loaded</p>
+              <span>Upload an image or 3D file, then pick an effect.</span>
             </div>
-          )}
+          ) : null}
 
           <canvas
             className={`preview-canvas is-${fitMode}`}
